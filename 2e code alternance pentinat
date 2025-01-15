@@ -1,0 +1,151 @@
+##################################################################################
+
+# Entrainement de nouveaux modèles sur l'étude de la sinistralité ITT
+
+# Lancer ces lignes de code pour accéder aux données : 
+
+# tbl.donnee.itt <- read.csv("R:/Technique - Service/TECHNIQUE/PENTINAT_Antoine/fichiers R/tbl.donnee.itt.csv", sep = ";", dec = ".")
+# setDT(tbl.donnee.itt)
+
+# Appel (et eventuellement installation) des packages utilisés
+for (package in c('data.table', 'magrittr', 'dplyr',  'dtplyr', 'readxl', 'lubridate', 
+                  'reshape2', 'magrittr', 'here' ,'tidyr', 'clock', "xtable", "pROC")) {
+  if (!require(package, character.only=T, quietly=T)) {
+    install.packages(package)
+    library(package, character.only=T)
+  }
+}
+
+# Ce script peut servir de brouillon et permet de ne pas relancer tout le code de traitement des données
+
+tbl.donnee.itt <- read.csv("R:/Technique - Service/TECHNIQUE/PENTINAT_Antoine/fichiers R/tbl.donnee.itt.csv", sep = ";", dec = ".")
+setDT(tbl.donnee.itt)
+
+# Appel des fonctions ----
+source(here::here("fonctions.R"))
+
+source(here::here("fonction_objetpret.R"))
+
+# Uniformisons les chaines de caractères (ça facilite la vie)
+
+Unaccent <- function(text) {
+  text <- gsub("['`^~\"]", " ", text)
+  text <- iconv(text, to="ASCII//TRANSLIT//IGNORE")
+  text <- gsub("['`^~\"]", "", text)
+  return(text)
+}
+
+
+
+# Nouveau modèle avec l'objet du pret 
+
+# Ajout de la variable objetpret afin de segmenter selon le type de credit
+
+tbl.donnee.itt <- objetpret(tbl.donnee.itt)
+
+set.seed(1999)
+sample19 <- sample(c(TRUE, FALSE), nrow(tbl.donnee.itt), replace=TRUE, prob=c(0.8,0.2))
+train.modele.pret  <- marre_de_l_encodage(tbl.donnee.itt[sample19, ])
+test.modele.pret  <- marre_de_l_encodage(tbl.donnee.itt[!sample19, ])
+
+modele.pret<- glm(sinistreITT ~ capitaux + 
+                    rachat.credit + 
+                    IsFumeur.y + 
+                    tranches.agexp + 
+                    couverture_mno + 
+                    VLR +
+                    TypeCommune+
+                    tranche.age.contrat+
+                    objetpret+
+                    offset(log(exposition)),
+                  data = train.modele.pret,
+                  family = binomial(link = "logit"))
+
+summary(modele.pret)
+
+
+# Ré entrainement du modèle
+# Nouvelle modalite de reference pour l'objet des prêts
+tbl.donnee.itt[objetpret %in% c("credit immo",
+                                   "credit auto", 
+                                "autre pret"),
+                    objetpret := "Modalite de Reference"]
+
+# On fixe la modalite de reference
+tbl.donnee.itt$objetpret <- as.factor(tbl.donnee.itt$objetpret)
+tbl.donnee.itt$objetpret <- relevel(tbl.donnee.itt$objetpret , ref = "Modalite de Reference")
+
+set.seed(1999)
+sample20<- sample(c(TRUE, FALSE), nrow(tbl.donnee.itt), replace=TRUE, prob=c(0.8,0.2))
+train.modele.pret2  <- marre_de_l_encodage(tbl.donnee.itt[sample20, ])
+test.modele.pret2  <- marre_de_l_encodage(tbl.donnee.itt[!sample20, ])
+modele.pret2 <- glm(sinistreITT ~ capitaux + 
+                      rachat.credit + 
+                      IsFumeur.y + 
+                      tranches.agexp + 
+                      couverture_mno + 
+                      VLR +
+                      TypeCommune+
+                      tranche.age.contrat+
+                      objetpret+
+                      offset(log(exposition)),
+                    data = train.modele.pret2,
+                    family = binomial(link = "logit"))
+summary(modele.pret2)
+
+predictions_pret2 <- predict(modele.pret2, newdata = test.modele.pret2, type = "response") # car régression de poisson et qu'on veut une proba et non un nombre
+
+test_pret2 <- cbind(test.modele.pret2, predictions_pret2)
+predict_pret2 <-test_pret2[, .(nb_sinistre_predit = sum(predictions_pret2), 
+                             nb_sinistre_reel =sum(sinistreITT), 
+                             nb_observations = .N, 
+                             expo.totale = sum(exposition)), 
+                         by = c("VLR", "tranches.agexp", "tranche.age.contrat", "IsFumeur.y", "pretpro")]
+
+
+predict_pret2$ecart <- abs(predict_pret2$nb_sinistre_predit - predict_pret2$nb_sinistre_reel)
+
+# Courbe ROC et AUC
+roc_obj_pret2 <- roc(test_pret2$sinistreITT, predictions_pret2)
+plot(roc_obj_pret2,)
+auc(test_pret2$sinistreITT, predictions_pret2)
+
+train_pret <- cbind(train.modele.pret, predictions_pret)
+predict_pret <-test_pret[, .(nb_sinistre_predit = sum(predictions_pret), 
+                             nb_sinistre_reel =sum(sinistreITT), 
+                             nb_observations = .N, 
+                             expo.totale = sum(exposition)), 
+                         by = c("VLR", "tranches.agexp", "tranche.age.contrat", "IsFumeur.y", "pretpro")]
+
+
+predict_pret$ecart <- abs(predict_pret$nb_sinistre_predit - predict_pret$nb_sinistre_reel)
+
+# Courbe ROC et AUC
+roc_obj_pret <- roc(train_pret$sinistreITT, predictions_pret)
+plot(roc_obj_pret)
+auc(train_pret$sinistreITT, predictions_pret)
+
+
+# validation croisée (On va tenter de prendre le RMSE)
+# On ré-entraine le modèle sur le jeu de données complet
+
+modele.pret.cv<- glm(sinistreITT ~ capitaux + 
+                       rachat.credit + 
+                       IsFumeur.y + 
+                       tranches.agexp + 
+                       couverture_mno + 
+                       VLR +
+                       TypeCommune+
+                       tranche.age.contrat+
+                       objetpret+
+                       offset(log(exposition)),
+                     data = tbl.donnee.itt,
+                     family = binomial(link = "logit"))
+
+# Cross Validation
+k <- 10  # nombre de folds
+cv_result1.9 <- cv.glm(tbl.donnee.itt, modele.pret.cv,K = k)
+mse <- cv_result1.9$delta[1]   # Mean Squared Error métrique par défaut de la fonction cv.glm 
+rmse <- sqrt(mse)  # racine carré du MSE
+
+
