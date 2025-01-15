@@ -1,0 +1,436 @@
+#############################
+
+# Fonction pour créer la variable couverture MNO (Maladie Non Objectivables)
+
+# Antoine PENTINAT 
+
+# a.pentinat@afi-esca.com
+
+# JUIN 2024
+
+#############################
+
+# Exemple d'appel de la fonction ----
+
+# Table d'exemple 
+
+# tbl.test <- data.table(idtAdh = c("255701", "100013"))
+
+# tbl.assure_mno <- couverture_MNO(tbl.test)
+
+# La fonction doit prendre en entrée une table contenant la colonne "idtAdh" 
+
+
+# Appel du script de connexion ----
+source(here::here("connexion_bases.R"))
+
+
+# Script Fonction ----
+
+couverture_MNO <- function(data){
+  
+  sql.mno <- "with 
+	combi_plus as (
+	select  Idt_Combinaisons_Options, 
+		Code,
+		lo.Libelle
+	from	Rel_Combinaisons_Options rco, 
+		options_combi oc,
+		lst_options lo
+	where   rco.Idt_Options_Combi = oc.Idt_Options_Combi
+		and oc.Idt_options = lo.idt_Options
+		and lo.Libelle = 'Option Plus'
+	)
+select  c.Contrat, 
+		c.idtAdh,
+		c.NumAdh,
+		c.CodAss,
+		c.Idt_Combinaisons_Options 		
+from Contrats c
+inner join combi_plus on combi_plus.Idt_Combinaisons_Options = c.Idt_Combinaisons_Options
+union
+select c.Contrat, 
+		c.idtAdh,
+		c.NumAdh,
+		c.CodAss,
+		c.Idt_Combinaisons_Options
+		from Contrats c
+where c.Contrat in ('23013001', '23060011', '23068001', '23068011', '23070001', '23070011')"
+  
+  tbl.mno <- afinexion(nom.base = "AFI_Prod", requete = sql.mno, sourceODBC = "PROD_BI")[[1]]
+  
+  # syntaxe dyplr
+  
+  # data <- data%>%
+  #   mutate(MNO = case_when(idtAdh %in% tbl.mno[, idtAdh] ~ 1,
+  #                        TRUE ~ 0))
+  
+  # syntaxe data.table
+  
+  data[idtAdh %in% tbl.mno[, idtAdh], couverture_mno := 1]
+  data[is.na(couverture_mno), couverture_mno := 0]   
+  
+  return(data)
+}
+
+#############################
+
+# Fonction pour créer la variable couverture MNO (Maladie Non Objectivables)
+
+# Antoine PENTINAT 
+
+# a.pentinat@afi-esca.com
+
+# JUIN 2024
+
+#############################
+
+# Exemple d'appel de la fonction ----
+
+# tbl.test <- data.table(idtAdh = c("255701", "100013"))
+
+# tbl.banque_rac <- banque_rac(tbl.test)
+
+# La fonction doit prendre en entrée une table contenant une liste "idtAdh" à vérifier
+
+# Elle renvoie une table avec 3 colonnes "idtAdh", "Libelle
+
+# Appel du script de connexion ----
+source(here::here("connexion_bases.R"))# Fonction d'ajout de la variable rachat de crédit à une datatable ayant une colonne "banque"
+
+banque_rac <- function(data){
+  
+  
+  sql.rac <- "select  
+	c.idtAdh,
+	c.Contrat,
+	c.NumAdh,
+	c.CodAdh,
+	c.CodAss,
+	ca.CapitalInitial,
+	ca.SexeAss,
+	p.nom as banque,
+	v.Libelle as nom_produit, 
+	v.ClasseV as type_de_produit
+
+from 
+	Contrats c 
+	inner join Contrats_Annexe ca on c.idtAdh = ca.IdtAdh 
+	left join versions v on v.Contrat = c.Contrat and v.classeV in ('TMPDEC')	
+	left join personne p on ca.CodPreteur = p.CodPers
+where 
+  -- Pour exclure les sans effets et les contrats belges basculés sur la base de données belge
+  -- Lorsque la requête porte sur la base française (Gestassa Lille)
+	c.PositC not in (30,40)
+	and v.IdtPaysCommerc=67"
+  
+  tbl.rac <- afinexion(nom.base = "AFI_Prod", requete = sql.rac, sourceODBC = "PROD_BI")[[1]]
+  
+  tbl.rac$idtAdh <- as.character(tbl.rac$idtAdh)
+  
+  data <- merge(x = data,
+                y = tbl.rac,
+                by.x = "idtAdh",
+                by.y = "idtAdh")
+  
+  # Mise en cohÃ©rence des Ã©criture
+  data[, 
+       banque := Unaccent(banque)]
+  
+  data[, 
+       banque := str_to_lower(banque)]
+  # Corrections manuelles
+  data[banque %in% c("caisse depargne", 
+                     "caisse d epargne",
+                     "caisse epargne",
+                     "caisse depargne cepac",
+                     "caisse depargne et de",
+                     "caisse depargne et de pr",
+                     "caisse d epargne et de pr",
+                     "caisse d epargne haut de", 
+                     "caisse depargne hauts",
+                     "caisse depagne lorraine", 
+                     "caisse depargne grand", 
+                     "     caisse d epargne",
+                     "caisse epargne prevoyance",
+                     "caisse epargne prevo", 
+                     "caisse d epargne",
+                     "caisse d epargne ",
+                     "caisse d epargne auvergne",
+                     "caisse d epargne cepac",
+                     "caisse d epargne cote",
+                     "caisse d epargne cote d",
+                     "caisse d epargne des",
+                     "caisse d epargne et de",
+                     "caisse d epargne grand",
+                     "caisse d epargne ile de",
+                     "caisse d epargne loire",
+                     "caisse depargne ",
+                     "caisse depargne aquitain",
+                     "caisse depargne cote",
+                     "caisse depargne de",
+                     "caisse d epargne rhone",
+                     "caisse depargne des",
+                     "caisse d epargne loire ce",
+                     "caisse d epargne de",
+                     "caisse d epargne hauts",
+                     "caisse d epargne aquitain",
+                     "caisse depargne du ",
+                     "caisse depargne loire",
+                     "cebfc",
+                     "caisse depargne rhone",
+                     "caisse depargne rhones",
+                     "caisse epargne auvergne",
+                     "caisse epargne normandie", 
+                     "caisse epargne loire",
+                     "cehdf", 
+                     "cepal", 
+                     "cepac", 
+                     "ce hdf", 
+                     "cegee", 
+                     "cehdf agence amiens"), banque := "caisse d epargne"]
+  
+  data[banque %in% c("cg departement", 
+                     "cgi departement",
+                     "cgi-cgl",
+                     "cgi", 
+                     "cgi dep regroupement de"), banque := "cgi"]
+  
+  data[banque %in% c("la banque postale", 
+                     "la banque postale ",
+                     "la banque postale centre",
+                     "centre financier la",
+                     "la banque",
+                     "la banque postale - centr",
+                     "la banque postale -",
+                     "la banque postale centre ",
+                     "banque postale consumer",
+                     "la banque postale s.a",
+                     "la banque postale  centr",
+                     "la banque postale crec", 
+                     "la banque postale-",
+                     "banque postale", 
+                     "la banque postale finance", 
+                     "banque postale centre"), banque := "la banque postale"]
+  
+  data[banque %in% c("credit agricole",
+                     "credit agricole ",
+                     " credit agricole",
+                     "credit agricole sud",
+                     "credit agricole mutuel br",
+                     "crca",
+                     "credit agricole val de",
+                     "credit agricole centre",
+                     "credit agricole normandie",
+                     "credit agricole charente",
+                     "caisse regionale credit",
+                     "caisse regionale de",
+                     "credit agricole de",
+                     "crcam daquitaine",
+                     "creditlift cacf", "cacf",
+                     "credit lift - cacf",
+                     "caisse reg credit agric",
+                     "caisse reg credit",
+                     "cacf - creditlift",
+                     "credit agricole val",
+                     "credit agricole brie de p",
+                     "credit agricole credit", 
+                     "credit agricole mutuel", 
+                     "credit agricoleconsumer", 
+                     "credit agricole sa",
+                     "credit agricole brie",
+                     "credit agricole nord",
+                     "credit agricole nord de",
+                     "credit agricole touraine",
+                     "credit agricole touraine "), 
+       banque := "credit agricole"]
+  
+  data[banque %in% c("creatis",
+                     "creatis direction",
+                     "production",
+                     "creatis driection",
+                     "banque creatis"), banque := "creatis"]
+  
+  data[banque %in% c("cic",
+                     "cic lyonnaise de banque", 
+                     "banque cic nord ouest",
+                     "cic est",
+                     "cic iberbanco",
+                     "cic lyonnaise de banque", 
+                     "cic ouest",
+                     "cic de contres",
+                     "banque cic ouest",
+                     "cic nord ouest", 
+                     "cic lyonnaise de banque", 
+                     "cic lyonnaise de banque "), banque := "cic"]
+  
+  data[banque %in% c("cgi",
+                     "cgi dep regroupement", 
+                     "cgi depargement regroupem", 
+                     "cgi departement regroup", 
+                     "cgi departement regroupem", 
+                     "cgi /cgl",
+                     "cgl",
+                     "cgi dept regroupement",
+                     "cgi regroupement de pret",
+                     "cgi dept regroupement de",
+                     "cgi finances",
+                     "cgi dpt regroupement de", 
+                     "cgi dep regroupement de",
+                     "cgi finance", 
+                     "cgl  cgi"), banque := "cgi"]
+  
+  
+  
+  
+  
+  data[banque %in% c("cacf creditlift courtage",
+                     "cacf creditlift courtage ",
+                     "cacf credit lift courtage",
+                     "cacf credit lift",
+                     "cacf  credit lift",
+                     "creditlift courtage ",
+                     "credit agricole consumer", 
+                     "credit agricole consuler",
+                     "cacf  creditlift", 
+                     "cacf creditlift",
+                     "creditlift courtage",
+                     "credit lift ca consumer",
+                     "credit agricoleconsumer",
+                     "credilift",
+                     "creditlift",
+                     "credilift courtage",	
+                     " creditlift courtage",
+                     "credit lift courtage",
+                     "credit  agricole centre",
+                     "credit agricole",
+                     "credit agricole du nord",
+                     "credit agricole alpes",
+                     "credit agricole aquitaine",
+                     "caisse regionale de credi",
+                     "credit lift", 
+                     "c.r. credit agricole",
+                     "creditlift courtage",
+                     "caisse regionale du",
+                     "ca consumer",
+                     "credit lift - ca",
+                     "cacf credit lift", 
+                     "ca consumer finance", 
+                     "cacf - credit lift",
+                     "ca consumer finance ",
+                     "credit agricole du", 
+                     "ca cf", 
+                     "ca consumer credit lift", 
+                     "ca du centre ouest",
+                     "credit agricole lorraine",
+                     "ca sud rhone alpes",
+                     "cacf  creditlift ", 
+                     "creditlift courtage ca", 
+                     "creditlift ", 
+                     "credit agricole consumer ",
+                     "creditagricole consumer f", 
+                     "cacp", 
+                     "cacf- creditlift courtage",
+                     "credit agricole finistere",
+                     "credit agricole provence", 
+                     "cacf credilift courtage", 
+                     "cacf creditlift courtage ",
+                     "credit lift courtage rn", 
+                     "creditlift  ca consumer"
+  ), banque := "credit agricole"]
+  
+  data[banque %in% c("bnp paribas",
+                     "bnp paribas personal", 
+                     "bnp paribas personnal", 
+                     "cetelem  bnp paribas",
+                     "bnp paribas ",
+                     "bnp  paribas personal",
+                     "bnp paris personal",
+                     "bnp paribas personal fina", 
+                     "bnp personal finance",
+                     "bnp paribas sygma banque", 
+                     "sygma banque", 
+                     "bnpparibas personal finan", 
+                     "bnp sygma",
+                     "bnp paribas personal     ",
+                     "bnp paribas pf",
+                     "sygma", 
+                     "sygma  bnp paribas", 
+                     "bnp pf", 
+                     "bnp paribas finance"), banque := "bnp paribas"]
+  
+  
+  
+  
+  data[banque %in% c("ge money bank",
+                     "gemb", 
+                     "my money bank", 
+                     "mymb", 
+                     "my money bank tour",
+                     "my money banck",
+                     "my moneybank",
+                     "ge money banque", 
+                     "ge money banque "), banque := "money bank"]
+  
+  data[banque %in% c("credit mutuel",
+                     "caisse credit mutuel",
+                     "credit mutuel besancon",
+                     "credit mutuel de",
+                     "credit mutuel sud ouest",
+                     "credit mutuel de bretagne",
+                     "credit mutuel ",
+                     "ccm thury harcourt", 
+                     "credit mutuel enseignant",
+                     "caisse de credit mutuel",
+                     "ccm outre foret", 
+                     "credit mutuel de loutre"), banque := "credit mutuel"]
+  
+  data[banque %in% c("cfcal",
+                     "cfcal banque",
+                     "credit foncier communal",
+                     "credit foncier et communa"), banque := "cfcal"]
+  
+  data[banque %in% c("younited",
+                     "younited credit"
+  ), banque := "younited"]
+  
+  data[banque %in% c("banque royal st georges",
+                     "royal saint georges",
+                     "banque royal saintgeorges",
+                     "royal st georges banque",
+                     "georges",
+                     "banque royal st georges -"
+  ), banque := "royal st georges"]
+  
+  data[banque %in% c("bpi",
+                     "bpi aerios",
+                     "aerios bpi", 
+                     "bpi france financement", 
+                     "bpi france finance", 
+                     "bpifrance", "bpi france",
+                     "banque bpi", 
+                     "bpi france direction racgi", "bpifrance financement"
+  ), banque := "bpi"]
+  
+  
+  data[banque %in% c("ing",
+                     "ing direct",
+                     "ing bank"
+  ), banque := "ing"]
+  
+  data[banque %in% c("boursorama",
+                     "boursorama banque"
+  ), banque := "boursorama"]
+  
+  
+  rachat_credit <- c("creatis", "cfcal", "credit agricole", "money bank", "cgi", "bpi", "royal st georges")
+  
+  
+  data <- data %>%
+    mutate(rachat.credit = ifelse(banque %in% rachat_credit, 1, 0))
+  
+  data$rachat.credit <- as.factor(data$rachat.credit)
+  
+  return(data[, c("idtAdh", "rachat.credit", "nom_produit")])
+  
+}
