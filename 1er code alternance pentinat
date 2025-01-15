@@ -1,0 +1,3168 @@
+#################################################### -
+
+# Antoine PENTINAT ----
+# M1 MIASHS----
+# Script R Etude Statistique----
+# Avril 2024----
+
+# Etude sur la segmentation de la clientele en vue d'ajuster la tarification de la garantie ITT----
+# Lancez le script "aires urbaines" ici R:\Technique - Service\TECHNIQUE\PENTINAT_Antoine\fichiers R
+
+######################################################-
+
+# on libere de la memoire et on recommence la session à 0
+
+rm(list=ls())
+gc()
+
+######################################################-
+
+# Appel des fonctions ----
+source(here::here("fonctions.R"))
+
+# Appel des packages (et installation si besoin)
+
+for (package in c('odbc', 
+                  'DBI', 'dplyr', 'data.table', 'here', 'visreg', 
+                  'stringr', 'stringdist','lubridate', 'FactoMineR', 
+                  'explor','ade4', 'factoextra', 'FactoInvestigate', 
+                  'RColorBrewer', 'idendr0', 'gtsummary', 'car','pROC', 
+                  'MLmetrics', 'caret', 'e1071', 'Metrics', 'DMwR2','GGally', 'effects', 'xtable', 'boot','cvAUC', "mgcv", "survival",'survminer', "plotly")) {
+  if (!require(package, character.only=T, quietly=T)) {
+    if (Sys.getenv("APP_TYPE") != "Docker") { install.packages(package) }
+    library(package, character.only=T)
+  }
+}
+
+##########################-
+# import des tables      #----  
+##########################-
+
+
+# informations sur les assures
+
+tbl.assures <- fread("R:/Technique - Service/TECHNIQUE/WHILLEM/etude_complementaires/infos_assures.csv", sep = ";")
+
+# informations sur les sinistres
+
+tbl.sinistres_complet <- fread("R:/Technique - Service/TECHNIQUE/WHILLEM/etude_complementaires/infos_complete_sinistres.csv", sep = ";", dec = ",", encoding = 'UTF-8')
+
+# garanties prises par les assures + quelques variables explicatives
+
+tbl.contrat_garanties <- fread("R:/Technique - Service/TECHNIQUE/WHILLEM/etude_complementaires/infos_contrats_garanties.csv", sep = ";", dec = ",")
+
+# options prises pour chaque contrat
+
+tbl.options <- fread("R:/Technique - Service/TECHNIQUE/WHILLEM/etude_complementaires/infos_options.csv", sep = ";")
+
+# Type de sinistre pour chaque contrat (sinistre ou non)
+
+tbl.sinistres <- fread("R:/Technique - Service/TECHNIQUE/WHILLEM/etude_complementaires/infos_sinistres.csv", sep = ";")
+
+# surprimes de chaque contrats
+
+tbl.surprime <- fread("R:/Technique - Service/TECHNIQUE/WHILLEM/etude_complementaires/infos_surprime.csv", sep = ";")
+
+# table d'indice des prix (pour la prise en compte de l'inflation) + nettoyage rapide de la base
+
+tbl.indice.prix <- fread("R:/Technique - Service/TECHNIQUE/PENTINAT_Antoine/fichiers R/jeux de donnees/valeurs_mensuelles.csv", sep = ";", dec=".", encoding = 'UTF-8')
+
+tbl.indice.prix <- tbl.indice.prix[-c(1:5), -c(3:10)]
+
+colnames(tbl.indice.prix) <- c("periode", "indice")
+
+tbl.indice.prix <- as.data.table(tbl.indice.prix)
+
+tbl.indice.prix[,indice := as.numeric(indice)]
+
+tbl.indice.prix[,periode := paste0(periode,'-01')]
+
+tbl.indice.prix[,periode := as.Date(periode)]
+str(tbl.indice.prix)
+
+# import des donnees geographiques pour une cartographie
+
+tbl.donnees.geo <- fread("R:/Technique - Service/TECHNIQUE/PENTINAT_Antoine/fichiers R/jeux de donnees/points-extremes-des-departements-metropolitains-de-france.csv", sep = ",", dec = ".", encoding = 'UTF-8')
+
+# Uniformisons les chaines de caractères (ça facilite la vie)
+
+Unaccent <- function(text) {
+  text <- gsub("['`^~\"]", " ", text)
+  text <- iconv(text, to="ASCII//TRANSLIT//IGNORE")
+  text <- gsub("['`^~\"]", "", text)
+  return(text)
+}
+
+######################################################-
+# Changement de classe des variables dans les tables # ----
+######################################################-
+
+
+
+# fonction pour transformer en character les variables codes et identifiants et transformation en format Date pour les dates
+tbl.contrat_garanties[ , c("idtAdh", 
+                           "Codegar_IPTPRO", 
+                           "Codegar_ITTIPT", 
+                           "Codegar_IPP", 
+                           "Codegar_IPT", 
+                           "Codegar_ITT", 
+                           "Contrat", 
+                           "NumAdh", 
+                           "CodAdh", 
+                           "CodAss", 
+                           "code_courtier", 
+                           "IsFumeur") := lapply(.SD, as.character),.SDcols = c("idtAdh", 
+                                                                                "Codegar_IPTPRO", 
+                                                                                "Codegar_ITTIPT", 
+                                                                                "Codegar_IPP", 
+                                                                                "Codegar_IPT", 
+                                                                                "Codegar_ITT", 
+                                                                                "Contrat", 
+                                                                                "NumAdh", 
+                                                                                "CodAdh", 
+                                                                                "CodAss", 
+                                                                                "code_courtier", 
+                                                                                "IsFumeur")]
+
+# recodage pour les variables de la table assures
+
+tbl.assures[ , CodPers := as.character(CodPers)]
+tbl.assures[, departmt := as.character(departmt)]
+tbl.assures[, TypePersonne := as.character(TypePersonne)]
+
+# recodage pour les variables de la table tbl.options
+
+tbl.options[ , c("idtAdh", 
+                 "VLR", 
+                 "options_MOINS_30", 
+                 "options_MOINS_15", 
+                 "options_VHR", 
+                 "options_GC", 
+                 "options_IPP_100", 
+                 "options_UBEC_625", 
+                 "options_PEC_50", 
+                 "options_EXT_70", 
+                 "options_CARENCE_180", 
+                 "options_CARENCE_30", 
+                 "options_CARENCE_90", 
+                 "options_PLUS", "CodAss") := lapply(.SD, as.character),.SDcols = c("idtAdh", 
+                                                                                    "VLR", 
+                                                                                    "options_MOINS_30", 
+                                                                                    "options_MOINS_15", 
+                                                                                    "options_VHR", 
+                                                                                    "options_GC", 
+                                                                                    "options_IPP_100", 
+                                                                                    "options_UBEC_625", 
+                                                                                    "options_PEC_50", 
+                                                                                    "options_EXT_70", 
+                                                                                    "options_CARENCE_180", 
+                                                                                    "options_CARENCE_30", 
+                                                                                    "options_CARENCE_90", 
+                                                                                    "options_PLUS", 
+                                                                                    "CodAss")]
+# recodage pour les variables de la table sinistre
+
+tbl.sinistres[ ,c("idtadh", 
+                  "sinistreIPT", 
+                  "sinistreIPP", 
+                  "sinistreITT") := lapply(.SD, as.character),.SDcols = c("idtadh", 
+                                                                          "sinistreIPT", 
+                                                                          "sinistreIPP", 
+                                                                          "sinistreITT")]
+# recodage pour les variables de la table sinistre_complet
+
+tbl.sinistres_complet[, c("n", 
+                          "idtDoss", 
+                          "num_contrat", 
+                          "idtadh", 
+                          "beneficiaire", 
+                          "IdtReglement", 
+                          "reprise_access") := lapply(.SD, as.character),.SDcols = c("n", 
+                                                                                     "idtDoss", 
+                                                                                     "num_contrat", 
+                                                                                     "idtadh", 
+                                                                                     "beneficiaire", 
+                                                                                     "IdtReglement", 
+                                                                                     "reprise_access")]
+# recodage pour les variables de la tabme surprimes
+
+tbl.surprime[, c("idtAdh", 
+                 "surprime_ IPTPRO", 
+                 "surprime_ ITTIPT", 
+                 "surprime_ IPP", 
+                 "surprime_ IPT", 
+                 "surprime_ ITT") := lapply(.SD, as.character), .SDcols = c("idtAdh", 
+                                                                            "surprime_ IPTPRO", 
+                                                                            "surprime_ ITTIPT", 
+                                                                            "surprime_ IPP", 
+                                                                            "surprime_ IPT", 
+                                                                            "surprime_ ITT")]
+#str(tbl.surprime)
+
+
+
+# on merge la table contrat et la table options afin de savoir quels capitaux prennent certaines options
+tbl.contrat_options <- merge(x = tbl.options, 
+                             y = tbl.contrat_garanties, 
+                             by.x = 'idtAdh', 
+                             by.y = 'idtAdh')
+
+unique(tbl.contrat_options)  # on enlève les lignes en double
+
+
+
+# On va creer des variables categorielles afin de voir les liens entre les options prises par les assures et leurs capitaux
+# on va egalement ajouter la variable fumeur. 2 possibilites ici, soi prendre des tranches arbitraires 
+# (-200000, entre 200000 et 500000 et au dela de 500000) et diviser les capitaux initiaux en 3 parts egales.
+# On va choisir la troisième option
+
+#tbl.contrat_options<- tbl.contrat_options%>%mutate(class = case_when
+#                                                   ((CapitalInitial <= 200000) ~ 'Petit Capital',
+#                                                    (CapitalInitial > 200000 & CapitalInitial <= 500000) ~ 'Capital Moyen',
+#                                                  (CapitalInitial> 500000) ~ 'Gros Capital'))
+
+
+
+
+# on va egalement tenter de prendre en compte l'inflation dans nos capitaux afin d'être le plus precis possible
+# on va utiliser pour cela un tableau d'indice des prix à la consommation. 
+
+# on va extraire les capitaux pour appliquer les calculs
+
+capitaux <- tbl.contrat_options[, c(1, 41, 47)]
+
+
+# calcul de l'indice moyen par annees 
+capitaux <- capitaux%>%mutate(annee = year(capitaux$EffSous))
+tbl.indice.prix <- tbl.indice.prix%>%mutate(annee = year(tbl.indice.prix$periode))
+tbl.indice.prix <- tbl.indice.prix%>%group_by(annee)%>%
+  summarise(indice.moyen = mean(indice))
+
+# jointure
+capitaux.indice <- merge(x = capitaux,
+                         y = tbl.indice.prix,
+                         by.x = "annee", 
+                         by.y = "annee",)
+
+capitaux.indice <- capitaux.indice[]
+
+# on applique donc les coefficients moyens par annees en passant par la base 2015 et en convertissant après pour l'annee 2023.
+
+
+capitaux.indice[, capital2015 := CapitalInitial*100/indice.moyen]
+capitaux.indice[, capital2023 := (capital2015*117.4725)/100]
+
+
+tbl.contrat_options <- merge(x = tbl.contrat_options,
+                             y = capitaux.indice,
+                             by.x = "idtAdh",
+                             by.y = "idtAdh")
+
+
+# on divise les capitaux en 5 categories de taille egale (plus ou moins)
+
+nb_categories <- 5
+quantiles <- quantile(tbl.contrat_options$capital2023, 
+                      probs = seq(0, 1, length.out = nb_categories + 1)
+)
+#tbl.contrat_options$category <- cut(tbl.contrat_options$capital2023, 
+#                                    breaks = quantiles, 
+#                                    labels = c("petit capital", "capital moyen", "grand capital", "tres grand capital"), 
+#                                    include.lowest = TRUE)
+tbl.contrat_options$capitaux <- cut(tbl.contrat_options$capital2023, 
+                                    breaks = c(0, 100000, 180000,300000, 600000,17000000), 
+                                    labels = c("petit", "moyen", "moyen + ", "important", "tres grand"))
+summary(tbl.contrat_options$capitaux)
+summary(tbl.contrat_options$capital2023)
+
+
+# ici on a des valeurs negatives, on va traiter ce problème plus tard
+
+
+
+# On va faire la même chose pour les prestations versees au client
+# on va extraire les montants pour faire les calculs
+
+prestations <- tbl.sinistres_complet[, c("idtadh", "MontantPrestation", "Annee_Paiement")]
+prestations <- merge(x = prestations, 
+                     y = tbl.indice.prix,
+                     by.x = "Annee_Paiement", 
+                     by.y = "annee")
+setDT(prestations)
+
+prestations[, presta2015 := MontantPrestation*100/indice.moyen]
+prestations[, presta2023 := (presta2015*117.4725)/100]
+
+summary(prestations$presta2023)
+
+prestations2023 <- prestations[, c(1, 2, 6)]
+
+# on remet ce resultat dans la table tbl.sinistre_complet
+
+
+tbl.sinistres_complet <- merge(x = tbl.sinistres_complet,
+                               y = tbl.indice.prix,
+                               by.x = "Annee_Paiement",
+                               by.y = "annee")
+
+tbl.sinistres_complet[, prestation2015 := MontantPrestation*100/indice.moyen]
+tbl.sinistres_complet[, prestation2023 := (prestation2015*117.4725)/100]
+
+
+
+# frequence et plot des modalites
+frequence <- function(data, variables) {
+  for (variable in variables) {
+    # Calculer la frequence de chaque modalite
+    frequencies <- table(data[[variable]])
+    
+    # Calculer les proportions
+    proportions <- prop.table(frequencies)
+    
+    # Afficher la table de frequence
+    cat("Table de frequence pour la variable", variable, ":\n")
+    print(frequencies)
+    
+    # Creer un graphique à barres pour visualiser les proportions
+    barplot(proportions, main = paste("Frequence de", variable), xlab = variable, ylab = "Proportion")
+    cat("\n")
+    
+  }
+}
+
+
+# appel de la fonction
+frequence(data = tbl.contrat_options, c("options_PLUS", 
+                                        "VLR", 
+                                        "options_CARENCE_30", 
+                                        "options_CARENCE_90", 
+                                        "options_CARENCE_180", 
+                                        "options_VHR"))
+
+##############################################-
+# Statistiques Descriptives                  # ----
+##############################################-
+
+# calcul des prestations moyennes par sinistre
+
+tbl.sinistres_complet[, .(prestation2023 = sum(prestation2023)), 
+                      by = c("Type_sinistre", "idtDoss")][, .(prestation.moyenne = mean(prestation2023)), 
+                                                          by = Type_sinistre]
+
+
+# ici, il est possible que des personnes aient eu plusieurs ITT. Il est donc normal qu'il y ai plusieurs idtadh
+
+# Montant des prestations par dossier pour les ITT
+tbl.sinistres_completITT <- tbl.sinistres_complet[Type_sinistre == 'ITT']
+tbl.sinistres_completITTG <- tbl.sinistres_completITT%>%group_by(idtDoss, date_ouverture)%>%
+  summarise(sumpresta = sum(prestation2023),
+            datepaiementmin = min(DatePaiement))
+
+setDT(tbl.sinistres_completITTG)
+
+tbl.sinistres_completITTG[, datepaiementmin := as.Date(datepaiementmin)]
+tbl.sinistres_completITTG[, date_ouverture := as.Date(date_ouverture)]
+
+tbl.sinistres_completITTG <- tbl.sinistres_completITTG%>%mutate(delai = datepaiementmin - date_ouverture)
+
+tbl.sinistres_completITTG$idtDoss = as.character(tbl.sinistres_completITTG$idtDoss)
+setDT(tbl.sinistres_completITTG)
+mean = mean(tbl.sinistres_completITTG$sumpresta)
+print(mean)
+# on retombe bel et bien sur la même valeur pour la somme moyenne des presta totales pour les ITT
+
+# on veut la distribution des delais
+
+tbl.sinistres_completITTG <- tbl.sinistres_completITTG %>%
+  mutate(delais_num = as.numeric(gsub(" days", "", delai)))
+
+ggplot(tbl.sinistres_completITTG, aes(x = delais_num)) +
+  geom_histogram(binwidth = 5, fill = "blue", color = "black", alpha = 0.5) +
+  labs(title = "Distribution des delais en jours",
+       x = "Nombre de jours",
+       y = "Nombre") +
+  scale_x_continuous(breaks=seq(0,1500,100))
+theme_minimal()
+
+summary(tbl.sinistres_completITTG$delais_num)
+
+# cas ou les paiements ont lieu avant 90j --> sinistres lies et pas de franchise si 2nd avant 60J après la fin du precedent
+# mettre une note sur les ibnr sur le rapport
+# à 270j entre la date du sinistre et le 1er versement, j'ai 95% de mes 1ers paiements. Donc si je prend 2023 -270j je suis sûr d'avoir 95% de mes sinistres 
+# (à cause des decalarations tardives des sinistres et des delais de franchise)
+# pour 2023 ne prendre quel'exposition et les sinistres du 1er janvier au 31 mars (calcul à refaire pour etre + precis mais l'idee est là)
+
+
+tbl.sinistres_completITTG <- tbl.sinistres_completITTG[order(delais_num)]
+tbl.sinistres_completITTG[, pourcentage_cumule := frank(delais_num)/.N]
+
+colnames(tbl.sinistres_complet)[10] <- c("Annee_sinistre")
+# on calcule l'age de la personne au moment du sinistre pour faire des stats par age
+tbl.sinistres_complet <-tbl.sinistres_complet %>% mutate(age_au_sinistre = tbl.sinistres_complet$Annee_sinistre - year(DatNais))
+head(tbl.sinistres_complet)
+unique(tbl.sinistres_complet[, 
+                             .(idtDoss, age_au_sinistre, Type_sinistre)])[, 
+                                                                          .(age.moyen = mean(age_au_sinistre), 
+                                                                            age.min = min(age_au_sinistre), 
+                                                                            age.max = max(age_au_sinistre), 
+                                                                            age.median = median(age_au_sinistre)), 
+                                                                          by = Type_sinistre]
+
+
+# on va joindre avec une table d'information des sinistres pour avoir la date de survenance
+sinistreITT <- tbl.sinistres[sinistreITT == 1, ]
+
+tbl.sinistreITT <- merge(x = sinistreITT,
+                         y = tbl.sinistres_complet, 
+                         by.x = "idtadh", 
+                         by.y = "idtadh")
+
+#tbl.sinistreITT <- merge(x = tbl.sinistreITT,
+#                         y = age_sinistre[,c(1,5)], 
+#                         by.x = 'idtadh',
+#                         by.y = 'idtadh',
+#                         allow.cartesian = TRUE)
+#tbl.sinistreITT <- unique(tbl.sinistreITT)
+
+tbl.sinistreITT <- tbl.sinistreITT%>%group_by(idtadh, date_sinistre, idtDoss, sinistreITT, age_au_sinistre)%>%summarise(prestation = sum(prestation2023))
+
+
+
+######################################################################-
+# Calcul des distances de Levenshtein pour retirer tout les doublons # ----
+######################################################################-
+
+
+# Dans la table assures, on veut voir quels personnes ont plusieurs CodPers groupe par nom prenom dtn et bureau distributeur.
+# On ne garde que le nom, le prenom et la date de naissance  --> 541 cas
+tbl.assures[,.N, by = c('CodPers', 
+                        'Nom', 
+                        'Prenom', 
+                        'DatNais',
+                        'burDis')][,.N,by = c('Nom', 
+                                              'Prenom', 
+                                              'DatNais',
+                                              'burDis')][,.N,by = c('Nom', 
+                                                                    'Prenom', 
+                                                                    'DatNais')][N>1][order(-N)]
+
+# Par exemple DELBART Emilia qui 3x a la même date de naissance, 3x le même nom, le même metier mais qui a 3 burdis differents et 3 CodPers differents
+#--> même personne creee 3x par les gestionnaires.
+
+tbl.doublons <- tbl.assures[,.N, by = c('CodPers',
+                                        'Nom', 
+                                        'Prenom', 
+                                        'DatNais',
+                                        'burDis',
+                                        "QualiteCiv")][,.N,by = c('Nom', 
+                                                              'Prenom', 
+                                                              'DatNais',
+                                                              'burDis',
+                                                              "QualiteCiv")][,.N,by = c('Nom', 
+                                                                                    'Prenom', 
+                                                                                    'DatNais',
+                                                                                    "QualiteCiv")][N>1][order(-N)]
+
+# On va donc devoir choisir un critère qui nous permet de definir un individu et ensuite faire des stats par individus et non par contrats. 
+# on va voir dans gestassa si ces cas sont bien des doublons et appliquer une methode (Levenshtein) pour calculer la distance entre 2 chaines de caractère 
+# puis trier par DTN et par bureau de distribution. Si les bureaux de distributions sont dans le même departement, on pourra considerer qu'il s'agit d'une seule et même personne
+# On verra ensuite au cas par cas les cas restants
+
+# Champ intermediaire dans la generaion de la liste 
+# Concatenation du nom et du prenom, debarasse de tout les symboles qui ne sont pas des lettres
+tbl.assures[, nom.prenom := str_replace_all(tolower(str_replace_all(paste0(Nom, Prenom), "[^[:graph:]]", "")),"[[:punct:][:digit:]]", "")]
+
+# Creation d'un table pour les distances de Levenshtein et autres
+tbl.a <- tbl.assures[, .(nom.prenom1 = nom.prenom, Nom1 = Nom, Prenom1 = Prenom, Date.Naissance.Assure1 = DatNais, 
+                         Code.Personne.Gestass1 = CodPers, SexeAss = QualiteCiv)]
+
+tbl.b <- tbl.assures[, .(nom.prenom2 = nom.prenom, Nom2 = Nom, Prenom2 = Prenom, Date.Naissance.Assure2 = DatNais,
+                         Code.Personne.Gestass2 = CodPers, SexeAss = QualiteCiv)]
+
+#on ne garde qu'une seule fois une même personne
+tbl.a <- unique(tbl.a)
+tbl.b <- unique(tbl.b)
+
+# Table des paires à comparer :        
+tbl.dedoubl.dnaiss <- merge(tbl.a, tbl.b, by.x = "Date.Naissance.Assure1", by.y = "Date.Naissance.Assure2", allow.cartesian = TRUE)
+
+# Suppression des cas identiques et  pour ne conserver qu'une seule fois chaque paire
+tbl.dedoubl.dnaiss <- tbl.dedoubl.dnaiss[Code.Personne.Gestass1 < Code.Personne.Gestass2,]
+
+# Calcul des distances de Levenshtein
+tbl.dedoubl.dnaiss[, distance := stringdist(nom.prenom1, nom.prenom2, method = "lv")]
+
+tbl.dedoubl.dnaiss[, .N, by = distance][distance == 1]
+
+# On va supprimer personnes dont la distance de levenshtein est inferieure à 2
+duplicates <- tbl.dedoubl.dnaiss[tbl.dedoubl.dnaiss$distance < 2, ]
+
+codes_to_remove <- duplicates$Code.Personne.Gestass2
+
+# On filtre les doublons de la table
+tbl.assures.unique <- tbl.dedoubl.dnaiss[!tbl.dedoubl.dnaiss$Code.Personne.Gestass2 %in% codes_to_remove, ]
+
+tbl.aprime <- tbl.assures.unique[, c(1:6)]
+tbl.bprime <- tbl.assures.unique[, c(1, 7:12)]
+
+tbl.aprime <- unique(tbl.aprime)
+tbl.bprime <- unique(tbl.bprime)
+
+tbl.assures2 <- merge(x = tbl.aprime,
+                      y = tbl.bprime,
+                      by.x = "Code.Personne.Gestass1", 
+                      by.y = "Code.Personne.Gestass2")
+
+# Calcul des distances de Levenshtein
+tbl.assures2[, distance := stringdist(nom.prenom1, nom.prenom2, method = "lv")]
+# tbl.assures2 <- tbl.assures2[, -c(6:10)]
+
+# on poursuit cette partie un peu plus loin dans le code pour les taux de sinistralite par tête
+
+
+tbl.sinistre_ipt_itt_ipp <- tbl.sinistres_complet[, c("idtadh", "Type_sinistre", "prestation2023", "age_au_sinistre")]
+tbl.sinistre_ipt_itt_ipp <- tbl.sinistre_ipt_itt_ipp%>%group_by(idtadh, age_au_sinistre, Type_sinistre)%>%summarise(sommepresta = sum(prestation2023))
+#head(tbl.sinistre_ipt_itt_ipp)
+
+
+# on va maintenant vouloir voir quel est le pourcentage de sinistres sur le portefeuille complet puis affiner petit à petit avec de nouvelles variables explicatives
+#on va demarrer par ne garder que les assures ayant souscrit à une garantie donnee (ITT, IPT ou IPP les autres garanties etant obligatoires). 
+# Pour cela, on va regarder si il y a un capital garanti pour ce sinistre ainsi qu'une date de debut de la garantie
+# plusieurs probèmes observes = capitaux garantis negatifs ou nuls alors qu'il y a une date de debut de garantie
+# On va supprimer ces lignes
+
+tbl.contrat_garanties[!is.na(DateDebutG_IPP) & CapitalGaranti_IPP < 0]
+tbl.contrat_garanties[!is.na(DateDebutG_IPP) & CapitalGaranti_IPP == 0]
+
+
+#on enlève donc les cas impossibles (ici où les capitaux garanties IPP sont negatifs)
+tbl.contrat_garanties <- tbl.contrat_garanties[-c(17082, 17741, 24523, 26300, 123111)]
+
+#on fait de même pour les IPT
+tbl.contrat_garanties[!is.na(DateDebutG_IPT) & CapitalGaranti_IPT < 0]
+tbl.contrat_garanties <- tbl.contrat_garanties[-c(21141, 48367, 89817, 91228, 123859, 134954)]
+
+#on fini par verifier les ITT (aucune ligne n'est concernee)
+tbl.contrat_garanties[!is.na(DateDebutG_ITT) & CapitalGaranti_ITT < 0]
+
+
+tbl.contrat_garanties <- tbl.contrat_garanties[CapitalInitial >0]
+#creation de la nouvelle BDD
+tbl.contrat_IPP = tbl.contrat_garanties[!is.na(DateDebutG_IPP) & tbl.contrat_garanties$CapitalGaranti_IPP > 0]
+head(tbl.contrat_IPP)
+tbl.contrat_IPP[!is.na(DateDebutG_IPP) & CapitalGaranti_IPP < 0]
+tbl.contrat_IPP <- tbl.contrat_IPP[, -c(2:9)]
+#on se retrouve avec une table qui ne reprend que les contrats ayant souscrit à une garantie IPP
+
+tbl.contrat_IPT = tbl.contrat_garanties[!is.na(DateDebutG_IPT) & CapitalGaranti_IPT > 0]
+tbl.contrat_IPT[!is.na(DateDebutG_IPT) & CapitalGaranti_IPT < 0]
+tbl.contrat_IPT <- tbl.contrat_IPT[, -c(2:9)]
+head(tbl.contrat_IPT)
+
+#on se retrouve avec une table de personnes qui ont pris la garantie IPT
+
+tbl.contrat_ITT = tbl.contrat_garanties[!is.na(DateDebutG_ITT) & CapitalGaranti_ITT > 0]
+tbl.contrat_ITT <- tbl.contrat_ITT[, -c(2:9)]
+tbl.contrat_ITT[!is.na(DateDebutG_ITT) & CapitalGaranti_ITT < 0]
+head(tbl.contrat_ITT)
+#on se retrouve avec une table qui ne reprend que les contrats ayant souscrit à une garantie ITT
+
+###########################################################################-
+# Fonction pour le calcul à la volee de duree d'exposition par periode    #----
+###########################################################################-
+
+
+# Le Paramètre tbl.contrat.expo doit être une data.table
+# Qui contient au moins un champs 'numero.contrat', 
+# un champs 'debut.garantie'
+# et un champs 'fin.garantie"
+# La fonciton calcul pour chaque ligne de cette table et 
+# chaque periode complète entre la date de debut de calcul des expositions et 
+# la date de fin de calcul des expostions
+expositions <- function(tbl.contrats.expo, date.debut.calcul.expo, date.fin.calcul.expo, periodicite){
+  # Test des paramètres  
+  if(!is.data.table(tbl.contrats.expo)){stop("Le paramètre tbl.contrats.expo table n'est pas au format data.table")}
+  # Tables des periodes
+  tbl.periodes <- data.table(debut.periode = seq(date.debut.calcul.expo, date.fin.calcul.expo %m+% days(-1),  by = periodicite))
+  tbl.periodes[, fin.periode := debut.periode %m+% case_when(periodicite == "years" ~ years(1),
+                                                             periodicite == "months" ~ months(1), 
+                                                             periodicite == "days" ~ days(1)
+  )]
+  # Liens entre les periodes et les duree de couvertures qui les recouvrent partiellement ou entièrement
+  setkey(tbl.periodes, debut.periode, fin.periode)
+  tbl.contrats.exposition <- foverlaps(tbl.contrats.expo, 
+                                       tbl.periodes, 
+                                       by.x = c("debut.garantie", "fin.garantie"), 
+                                       by.y = c("debut.periode", "fin.periode")
+  )
+  tbl.contrats.exposition[, exposition := pmax(debut.periode, debut.garantie) %--% pmin(fin.periode, fin.garantie, date.fin.calcul.expo) / years(1)]
+  return(tbl.contrats.exposition)
+}
+
+
+
+# on va maintenant modifier les bases afin de pouvoir executer cette fonction en emttant le bon nom de colonnes
+names(tbl.contrat_IPP)[c(3,4,15)] = c("debut.garantie", "fin.garantie", "numero.contrat")
+names(tbl.contrat_IPT)[c(7,8,15)] = c("debut.garantie", "fin.garantie", "numero.contrat")
+names(tbl.contrat_ITT)[c(11,12,15)] = c("debut.garantie", "fin.garantie", "numero.contrat")
+
+# certains cas presentent des anomalies : plusieurs dates de fin de garanties sont inferieures aux dates de debut des garanties
+# on a dinc verifie les raisons dans Gestassa.
+# ces cas presentent des avenants de remboursement de prets avant le debut des garanties optionelles (IPP et ITT aucun cas en IPT)
+# on va donc retirer ces cas de la base de donnees.
+tbl.contrat_IPP <- tbl.contrat_IPP[-c(2424, 8922, 11646, 12051, 12442, 35819, 42887, 58975, 70566, 84384, 84411, 84428),]
+
+
+#on a des cas similaires dans la base contrat_ITT et on va les retirer de la base de donnees
+#tbl.contrat_ITT <- tbl.contrat_ITT[-c(5360, 7247, 7373, 12913, 12939, 16742, 19401, 23947, 23952, 24075, 24634, 24641, 25279, 26323, 27481, 29921, 51029, 74178, 78832, 86746, 86747, 90128, 93436, 123943, 124446, 125067, 135357, 135602, 152185),]
+#tbl.contrat_ITT <- tbl.contrat_ITT[-c(159613, 172378, 182993, 183029, 183057)]
+
+tbl.contrat_ITT <- tbl.contrat_ITT[debut.garantie<fin.garantie]
+
+# on calcule maintenant les expositions par annees
+# ITT
+
+tbl.contrat_ITT[, debut.garantie := as.Date(debut.garantie)]
+tbl.contrat_ITT[, fin.garantie := as.Date(fin.garantie)]
+
+date.debut.calcul.expo <-  as.Date('01/01/2018', '%d/%m/%Y')
+date.fin.calcul.expo <-  as.Date('01/01/2024', '%d/%m/%Y')
+tbl.contrat_ITT_expo <- expositions(tbl.contrats.expo = tbl.contrat_ITT,
+                                    date.debut.calcul.expo = date.debut.calcul.expo,
+                                    date.fin.calcul.expo = date.fin.calcul.expo,
+                                    periodicite = 'years')
+
+
+# on cherche à compter le nombre de sinistres par contrat 
+setDT(tbl.sinistreITT)
+tbl.contrat_ITT_expo
+
+# Combien de sinistres aux maximum pour un contrat ?
+tbl.sinistreITT[, .N, by = idtadh][, max(N)]
+
+# Donc 4 jointures ... 
+# D'abord pour le premier sinistre, puis les second ..Etc.
+
+# Donner un rang à chaque sinistre pour chanque cntrat
+tbl.sinistreITT[, rang_sinistre := frank(date_sinistre), by = c("idtadh")]
+
+# Pb : sinistres à la même date :
+tbl.sinistreITT[, .N, by = c("idtadh", "date_sinistre")][ N>1]
+
+# => traiter à la main ??
+
+# ou bien il y a de toute façon un sinistre 
+tbl.sinistreITT_unique <- unique(tbl.sinistreITT[, .(date_sinistre, idtadh)])
+tbl.sinistreITT_unique[, rang_sinistre := frank(date_sinistre), by = idtadh]
+
+
+# Finalement trois jointures : 
+
+# 1.
+tbl.contrat_ITT_expo <- merge(tbl.contrat_ITT_expo, 
+                              tbl.sinistreITT_unique[rang_sinistre == 1, .(idtadh, date_sinistre1 = date_sinistre)], 
+                              by.x = "idtAdh", 
+                              by.y = "idtadh", 
+                              all.x = TRUE)
+
+
+# 2.
+tbl.contrat_ITT_expo <- merge(tbl.contrat_ITT_expo, 
+                              tbl.sinistreITT_unique[rang_sinistre == 2, .(idtadh, date_sinistre2 = date_sinistre)], 
+                              by.x = "idtAdh", 
+                              by.y = "idtadh", 
+                              all.x = TRUE)
+
+# 3.
+tbl.contrat_ITT_expo <- merge(tbl.contrat_ITT_expo, 
+                              tbl.sinistreITT_unique[rang_sinistre == 3, .(idtadh, date_sinistre3 = date_sinistre)], 
+                              by.x = "idtAdh", 
+                              by.y = "idtadh", 
+                              all.x = TRUE)
+
+
+# Compter un sinistre que dans la periode où il survient :
+
+tbl.contrat_ITT_expo[, n.sinistres := 
+                       fcase(!is.na(date_sinistre1) & date_sinistre1 >= debut.periode
+                             & date_sinistre1 < fin.periode , 1, default = 0) +
+                       fcase(!is.na(date_sinistre2) & date_sinistre2 >= debut.periode
+                             & date_sinistre2 < fin.periode , 1, default = 0) +
+                       fcase(!is.na(date_sinistre3) & date_sinistre3 >= debut.periode
+                             & date_sinistre3 < fin.periode , 1, default = 0)
+]
+
+
+
+##########################################-
+# Calcul des taux de sinistralite        #----
+##########################################-
+
+# Taux de sinistralite total : 
+
+taux1 = sum(tbl.contrat_ITT_expo$n.sinistres)/sum(tbl.contrat_ITT_expo$exposition)
+taux1*100
+
+
+tbl.sinistreITT$date_sinistre <- as.Date(tbl.sinistreITT$date_sinistre)
+ITT_annees <- function(data) {
+  data%>%
+    mutate(annee = year(date_sinistre)) %>%  
+    group_by(annee) %>%                      
+    summarise(nombre_sinistres = n()) 
+}
+resultat <- ITT_annees(tbl.sinistreITT)
+
+
+# Taux de sinistralite 2018
+
+expo2018 <- tbl.contrat_ITT_expo[debut.periode == as.Date('2018/01/01')
+                                 &
+                                   fin.periode == as.Date('2019/01/01'),]
+
+
+sinistre2018 <- tbl.contrat_ITT_expo[debut.periode == as.Date('2018/01/01')
+                                     &
+                                       fin.periode == as.Date('2019/01/01'),]
+taux2018 = sum(sinistre2018$n.sinistres)/sum(expo2018$exposition)
+taux2018*100
+
+# Taux de sinistralite 2019
+
+expo2019 <- tbl.contrat_ITT_expo[debut.periode == as.Date('2019/01/01')
+                                 &
+                                   fin.periode == as.Date('2020/01/01'),]
+
+sinistre2019 <- tbl.contrat_ITT_expo[debut.periode == as.Date('2019/01/01')
+                                     &
+                                       fin.periode == as.Date('2020/01/01'),]
+taux2019 = sum(sinistre2019$n.sinistres)/sum(expo2019$exposition)
+taux2019*100
+
+# calcul du taux de sinistralite 2020
+
+expo2020 <- tbl.contrat_ITT_expo[debut.periode == as.Date('2020/01/01')
+                                 &
+                                   fin.periode == as.Date('2021/01/01'),]
+
+sinistre2020 <- tbl.contrat_ITT_expo[debut.periode == as.Date('2020/01/01')
+                                     &
+                                       fin.periode == as.Date('2021/01/01'),]
+taux2020 = sum(sinistre2020$n.sinistres)/sum(expo2020$exposition)
+taux2020*100
+
+# calcul du taux de sinistralite 2021
+
+expo2021 <- tbl.contrat_ITT_expo[debut.periode == as.Date('2021/01/01')
+                                 &
+                                   fin.periode == as.Date('2022/01/01'),]
+
+sinistre2021 <- tbl.contrat_ITT_expo[debut.periode == as.Date('2021/01/01')
+                                     &
+                                       fin.periode == as.Date('2022/01/01'),]
+taux2021 = sum(sinistre2021$n.sinistres)/sum(expo2021$exposition)
+taux2021*100
+
+# Calcul du taux de sinistralite 2022
+
+expo2022 <- tbl.contrat_ITT_expo[debut.periode == as.Date('2022/01/01')
+                                 &
+                                   fin.periode == as.Date('2023/01/01'),]
+
+sinistre2022 <- tbl.contrat_ITT_expo[debut.periode == as.Date('2022/01/01')
+                                     &
+                                       fin.periode == as.Date('2023/01/01'),]
+
+taux2022 = sum(sinistre2022$n.sinistres)/sum(expo2022$exposition)
+taux2022*100
+
+# Calcul du taux de sinistralite pour 2023
+
+expo2023 <- tbl.contrat_ITT_expo[debut.periode == as.Date('2023/01/01')
+                                 &
+                                   fin.periode == as.Date('2024/01/01'),]
+
+sinistre2023 <- tbl.contrat_ITT_expo[debut.periode == as.Date('2023/01/01')
+                                     &
+                                       date_sinistre1 <= as.Date('2023/08/31'),]
+taux2023 = sum(sinistre2023$n.sinistres)/sum((expo2023$exposition)*(270/365))
+taux2023*100
+
+# taux de sinistralite global
+sinistralite.totale = sum(resultat$nombre_sinistres)/sum(tbl.contrat_ITT_expo$exposition)
+sinistralite.totale*100
+
+
+# taux de sinistralites annuels
+
+taux.sinistralite <- data.table(
+  annee = c("2018", "2019", "2020", "2021", "2022", "2023", "total"),
+  taux.de.sinistralite = c(taux2018*100, taux2019*100, taux2020*100, taux2021*100, taux2022*100, taux2023*100, taux1*100),
+  nombre.sinistres = c(sum(sinistre2018$n.sinistres), 
+                       sum(sinistre2019$n.sinistres), 
+                       sum(sinistre2020$n.sinistres), 
+                       sum(sinistre2021$n.sinistres), 
+                       sum(sinistre2022$n.sinistres),
+                       sum(sinistre2023$n.sinistres),
+                       sum(tbl.contrat_ITT_expo$n.sinistres)),
+  somme.exposition = c(sum(expo2018$exposition),
+                       sum(expo2019$exposition),
+                       sum(expo2020$exposition),
+                       sum(expo2021$exposition),
+                       sum(expo2022$exposition),
+                       sum(expo2023$exposition),
+                       sum(tbl.contrat_ITT_expo$exposition))
+)
+
+
+# on va calculer les mêmes taux de sinistralite uniquement pour les fumeurs
+
+setDT(tbl.sinistreITT)
+setDT(tbl.contrat_ITT)
+
+
+tbl.sinistreITT <- merge(x = tbl.sinistreITT, 
+                         y = tbl.contrat_options[, c(1, 48, 62,63)], 
+                         by.x = "idtadh", 
+                         by.y = "idtAdh")
+
+tbl.sinistreITT.fumeurs <- tbl.sinistreITT[IsFumeur == '1']
+
+tbl.contrat_ITT_expo.fumeurs <- expositions(tbl.contrats.expo = tbl.contrat_ITT[IsFumeur == '1'],
+                                            date.debut.calcul.expo = date.debut.calcul.expo,
+                                            date.fin.calcul.expo = date.fin.calcul.expo,
+                                            periodicite = 'years')
+
+
+resultat.fumeurs <- ITT_annees(tbl.sinistreITT.fumeurs)
+sinistralite.totale.fumeurs = sum(resultat.fumeurs$nombre_sinistres)/sum(tbl.contrat_ITT_expo.fumeurs$exposition)
+sinistralite.totale.fumeurs*100
+
+
+# on va faire de même pour les non fumeurs
+
+
+tbl.sinistreITT.nonfumeurs <- tbl.sinistreITT[IsFumeur == '0']
+
+tbl.contrat_ITT_expo.nonfumeurs <- expositions(tbl.contrats.expo = tbl.contrat_ITT[IsFumeur == '0'],
+                                               date.debut.calcul.expo = date.debut.calcul.expo,
+                                               date.fin.calcul.expo = date.fin.calcul.expo,
+                                               periodicite = 'years')
+
+
+resultat.nonfumeurs <- ITT_annees(tbl.sinistreITT.nonfumeurs)
+sinistralite.totale.nonfumeurs = sum(resultat.nonfumeurs$nombre_sinistres)/sum(tbl.contrat_ITT_expo.nonfumeurs$exposition)
+sinistralite.totale.nonfumeurs*100
+
+
+
+
+# on va joindre avec les capitaux divises en 4 quantiles differents
+
+tbl.contrat_ITT_expo <- merge(x = tbl.contrat_ITT_expo, 
+                              y = tbl.contrat_options[, c(1, 47,48,62,63)], 
+                              by.x = "idtAdh",
+                              by.y = "idtAdh")
+
+tbl.contrat_ITT <- merge(x = tbl.contrat_ITT, 
+                         y = tbl.contrat_options[, c(1, 47,48,62,63)],
+                         by.x = 'idtAdh',
+                         by.y = 'idtAdh')
+setDT(tbl.sinistreITT)
+tbl.contrat_options$capitaux <- as.character(tbl.contrat_options$capitaux)
+
+
+
+
+# taux de sinistralite 4 quantiles petit capital (entre 0 et 100000 euros)
+
+tbl.sinistreITT.petitcapit <- tbl.sinistreITT[capitaux == 'petit']
+
+tbl.contrat_ITT_expo.petitcapit = expositions(tbl.contrats.expo = tbl.contrat_ITT[capitaux == 'petit'],
+                                              date.debut.calcul.expo = date.debut.calcul.expo,
+                                              date.fin.calcul.expo = date.fin.calcul.expo,
+                                              periodicite = 'years')
+
+resultat.petitcapit <- ITT_annees(tbl.sinistreITT.petitcapit)
+
+sinistralite.totale.petitcapit = sum(resultat.petitcapit$nombre_sinistres)/sum(tbl.contrat_ITT_expo.petitcapit$exposition)
+sinistralite.totale.petitcapit*100
+
+
+# sinistralite totale capitaux moyens (entre 100000 et 180000 euros)
+
+tbl.sinistreITT.capmoyen <- tbl.sinistreITT[capitaux == 'moyen']
+
+tbl.contrat_ITT_expo.capmoyen = expositions(tbl.contrats.expo = tbl.contrat_ITT[capitaux == 'moyen'],
+                                            date.debut.calcul.expo = date.debut.calcul.expo,
+                                            date.fin.calcul.expo = date.fin.calcul.expo,
+                                            periodicite = 'years')
+
+resultat.capmoyen <- ITT_annees(tbl.sinistreITT.capmoyen)
+
+sinistralite.totale.capmoyen = sum(resultat.capmoyen$nombre_sinistres)/sum(tbl.contrat_ITT_expo.capmoyen$exposition)
+sinistralite.totale.capmoyen*100
+
+# taux de sinistralite 4 quantiles capital moyen + (entre 180000 et 300000)
+
+tbl.sinistreITT.capitmoyen <- tbl.sinistreITT[capitaux == 'moyen + ']
+
+tbl.contrat_ITT_expo.capitmoyen = expositions(tbl.contrats.expo = tbl.contrat_ITT[capitaux == 'moyen + '],
+                                              date.debut.calcul.expo = date.debut.calcul.expo,
+                                              date.fin.calcul.expo = date.fin.calcul.expo,
+                                              periodicite = 'years')
+
+resultat.capitmoyen <- ITT_annees(tbl.sinistreITT.capitmoyen)
+
+sinistralite.totale.capitmoyen = sum(resultat.capitmoyen$nombre_sinistres)/sum(tbl.contrat_ITT_expo.capitmoyen$exposition)
+sinistralite.totale.capitmoyen*100
+
+# taux de sinistres capitaux 4 quantiles capital grand(entre 300000 et 600000)
+
+
+tbl.sinistreITT.important <- tbl.sinistreITT[capitaux == 'important']
+
+tbl.contrat_ITT_expo.important = expositions(tbl.contrats.expo = tbl.contrat_ITT[capitaux == 'important'],
+                                             date.debut.calcul.expo = date.debut.calcul.expo,
+                                             date.fin.calcul.expo = date.fin.calcul.expo,
+                                             periodicite = 'years')
+
+resultat.important <- ITT_annees(tbl.sinistreITT.important)
+
+sinistralite.totale.important = sum(resultat.important$nombre_sinistres)/sum(tbl.contrat_ITT_expo.important$exposition)
+sinistralite.totale.important*100
+
+# taux de sinistres capitaux 4 quantiles capital grand(au dela de 600000)
+
+
+tbl.sinistreITT.tgrand <- tbl.sinistreITT[capitaux == 'tres grand']
+
+tbl.contrat_ITT_expo.tgrand = expositions(tbl.contrats.expo = tbl.contrat_ITT[capitaux == 'tres grand'],
+                                          date.debut.calcul.expo = date.debut.calcul.expo,
+                                          date.fin.calcul.expo = date.fin.calcul.expo,
+                                          periodicite = 'years')
+
+resultat.tgrand <- ITT_annees(tbl.sinistreITT.tgrand)
+
+sinistralite.totale.tgrand = sum(resultat.tgrand$nombre_sinistres)/sum(tbl.contrat_ITT_expo.tgrand$exposition)
+sinistralite.totale.tgrand*100
+
+# Taux de sinistralite par tranches de capitaux
+
+taux.sinistralite.capitaux <- data.table(
+  annee = c("petit", "moyen", "moyen +", "important", "tres grand"),
+  taux.de.sinistralite = c(sinistralite.totale.petitcapit*100, 
+                           sinistralite.totale.capmoyen*100, 
+                           sinistralite.totale.capitmoyen*100, 
+                           sinistralite.totale.important*100,
+                           sinistralite.totale.tgrand*100),
+  tranche = c("0 - 100000", "100000 - 180000", "180000 - 300000", "300000 - 600000", "> 600000"),
+  nombre.de.contrats = c("70496", "62843", "54598", "20927", "4163")
+)
+
+
+# on enlève tout les doublons on a galere 2H avec Whillemn on en a marre !!!!!!!!!!!
+
+duplicates2 <- rbindlist(list(
+  duplicates[,.(Date.Naissance.Assure1,nom.prenom1,Nom1,Prenom1,Code.Personne.Gestass1)],
+  duplicates[,.(Date.Naissance.Assure1,nom.prenom1,Nom1,Prenom1,Code.Personne.Gestass2)]
+))
+duplicates2 <- unique(duplicates2, by = c("Date.Naissance.Assure1", "nom.prenom1", "Code.Personne.Gestass1"))
+codes_to_remove2 <- c(duplicates$Code.Personne.Gestass1,duplicates$Code.Personne.Gestass2)
+
+
+
+tbl.dedoubl.assures <- tbl.a[!(tbl.a$Code.Personne.Gestass1 %in% codes_to_remove2), ]
+
+duplicates2 <- duplicates2[nom.prenom1 != 'herininaharygraziella']
+duplicates2 <- duplicates2[nom.prenom1 != 'chenavazvirginie']
+duplicates2 <- duplicates2[nom.prenom1 != 'deregnaultdebellescizebertrand']
+
+duplicates2[nom.prenom1 == 'chenavazvirginie']
+
+tbl.assures2 <- rbindlist(list(
+  tbl.dedoubl.assures[, .(Date.Naissance.Assure1,nom.prenom1,Nom1,Prenom1,Code.Personne.Gestass1)],
+  duplicates2[, .(Date.Naissance.Assure1,nom.prenom1,Nom1,Prenom1,Code.Personne.Gestass1)]
+))
+
+
+tbl.contrat.sinsitreITT <- merge(x = tbl.contrat_ITT, 
+                                 y = tbl.assures2,
+                                 by.x = "CodAss", 
+                                 by.y = "Code.Personne.Gestass1",
+                                 all.x = TRUE)
+tbl.contrat.sinsitreITT[is.na(nom.prenom1)]
+tbl.contrat.sinsitreITT[nom.prenom1 == 'herininaharygrazilla']
+
+# 16573 personnes on plusieurs contrats
+tbl.contrat.sinsitreITT[, .N, by = c("nom.prenom1", "Date.Naissance.Assure1")][N>1][order(N)]
+# 176512 ont un seul contrats
+tbl.contrat.sinsitreITT[, .N, by = c("nom.prenom1", "Date.Naissance.Assure1")][N==1]
+
+
+# on va joindre la table des expositions avec la table des sinistresITT (utile pour calculer le taux de sinistralite)
+
+tbl.sinistreITT.expo <- merge(x = tbl.sinistreITT,
+                              y = tbl.contrat_ITT_expo, 
+                              by.x = "idtadh", 
+                              by.y = "idtAdh")
+
+tbl.sinistreITT.expo <- tbl.sinistreITT.expo%>%mutate(sinistre.expo = case_when(date_sinistre>debut.periode & 
+                                                                                  date_sinistre<fin.periode ~ '1',
+                                                                                date_sinistre<debut.periode ~ '0',
+                                                                                date_sinistre>fin.periode ~ '0'))
+
+# creation de la variable rachat de credit oui/non
+
+# Mise en cohÃ©rence des Ã©criture
+tbl.contrat_garanties[, 
+                      banque := Unaccent(banque)]
+
+tbl.contrat_garanties[, 
+                      banque := str_to_lower(banque)]
+
+
+# Corrections manuelles
+tbl.contrat_garanties[banque %in% c("caisse depargne", 
+                                    "caisse d epargne",
+                                    "caisse epargne",
+                                    "caisse depargne cepac",
+                                    "caisse depargne et de",
+                                    "caisse depargne et de pr",
+                                    "caisse d epargne et de pr",
+                                    "caisse d epargne haut de", 
+                                    "caisse depargne hauts",
+                                    "caisse depagne lorraine", 
+                                    "caisse depargne grand", 
+                                    "     caisse d epargne",
+                                    "caisse epargne prevoyance",
+                                    "caisse epargne prevo", 
+                                    "caisse d epargne",
+                                    "caisse d epargne ",
+                                    "caisse d epargne auvergne",
+                                    "caisse d epargne cepac",
+                                    "caisse d epargne cote",
+                                    "caisse d epargne cote d",
+                                    "caisse d epargne des",
+                                    "caisse d epargne et de",
+                                    "caisse d epargne grand",
+                                    "caisse d epargne ile de",
+                                    "caisse d epargne loire",
+                                    "caisse depargne ",
+                                    "caisse depargne aquitain",
+                                    "caisse depargne cote",
+                                    "caisse depargne de",
+                                    "caisse d epargne rhone",
+                                    "caisse depargne des",
+                                    "caisse d epargne loire ce",
+                                    "caisse d epargne de",
+                                    "caisse d epargne hauts",
+                                    "caisse d epargne aquitain",
+                                    "caisse depargne du ",
+                                    "caisse depargne loire",
+                                    "cebfc",
+                                    "caisse depargne rhone",
+                                    "caisse depargne rhones",
+                                    "caisse epargne auvergne",
+                                    "caisse epargne normandie", 
+                                    "caisse epargne loire",
+                                    "cehdf", 
+                                    "cepal", 
+                                    "cepac", 
+                                    "ce hdf", 
+                                    "cegee", 
+                                    "cehdf agence amiens"), banque := "caisse d epargne"]
+
+tbl.contrat_garanties[banque %in% c("cg departement", 
+                                    "cgi departement",
+                                    "cgi-cgl",
+                                    "cgi", 
+                                    "cgi dep regroupement de"), banque := "cgi"]
+
+tbl.contrat_garanties[banque %in% c("la banque postale", 
+                                    "la banque postale ",
+                                    "la banque postale centre",
+                                    "centre financier la",
+                                    "la banque",
+                                    "la banque postale - centr",
+                                    "la banque postale -",
+                                    "la banque postale centre ",
+                                    "banque postale consumer",
+                                    "la banque postale s.a",
+                                    "la banque postale  centr",
+                                    "la banque postale crec", 
+                                    "la banque postale-",
+                                    "banque postale", 
+                                    "la banque postale finance", 
+                                    "banque postale centre"), banque := "la banque postale"]
+
+tbl.contrat_garanties[banque %in% c("credit agricole",
+                                    "credit agricole ",
+                                    " credit agricole",
+                                    "credit agricole sud",
+                                    "credit agricole mutuel br",
+                                    "crca",
+                                    "credit agricole val de",
+                                    "credit agricole centre",
+                                    "credit agricole normandie",
+                                    "credit agricole charente",
+                                    "caisse regionale credit",
+                                    "caisse regionale de",
+                                    "credit agricole de",
+                                    "crcam daquitaine",
+                                    "creditlift cacf", "cacf",
+                                    "credit lift - cacf",
+                                    "caisse reg credit agric",
+                                    "caisse reg credit",
+                                    "cacf - creditlift",
+                                    "credit agricole val",
+                                    "credit agricole brie de p",
+                                    "credit agricole credit", 
+                                    "credit agricole mutuel", 
+                                    "credit agricoleconsumer", 
+                                    "credit agricole sa",
+                                    "credit agricole brie",
+                                    "credit agricole nord",
+                                    "credit agricole nord de",
+                                    "credit agricole touraine",
+                                    "credit agricole touraine "), 
+                      banque := "credit agricole"]
+
+tbl.contrat_garanties[banque %in% c("creatis",
+                                    "creatis direction",
+                                    "production",
+                                    "creatis driection",
+                                    "banque creatis"), banque := "creatis"]
+
+tbl.contrat_garanties[banque %in% c("cic",
+                                    "cic lyonnaise de banque", 
+                                    "banque cic nord ouest",
+                                    "cic est",
+                                    "cic iberbanco",
+                                    "cic lyonnaise de banque", 
+                                    "cic ouest",
+                                    "cic de contres",
+                                    "banque cic ouest",
+                                    "cic nord ouest", 
+                                    "cic lyonnaise de banque", 
+                                    "cic lyonnaise de banque "), banque := "cic"]
+
+tbl.contrat_garanties[banque %in% c("cgi",
+                                    "cgi dep regroupement", 
+                                    "cgi depargement regroupem", 
+                                    "cgi departement regroup", 
+                                    "cgi departement regroupem", 
+                                    "cgi /cgl",
+                                    "cgl",
+                                    "cgi dept regroupement",
+                                    "cgi regroupement de pret",
+                                    "cgi dept regroupement de",
+                                    "cgi finances",
+                                    "cgi dpt regroupement de", 
+                                    "cgi dep regroupement de",
+                                    "cgi finance", 
+                                    "cgl  cgi"), banque := "cgi"]
+
+
+
+
+
+tbl.contrat_garanties[banque %in% c("cacf creditlift courtage",
+                                    "cacf creditlift courtage ",
+                                    "cacf credit lift courtage",
+                                    "cacf credit lift",
+                                    "cacf  credit lift",
+                                    "creditlift courtage ",
+                                    "credit agricole consumer", 
+                                    "credit agricole consuler",
+                                    "cacf  creditlift", 
+                                    "cacf creditlift",
+                                    "creditlift courtage",
+                                    "credit lift ca consumer",
+                                    "credit agricoleconsumer",
+                                    "credilift",
+                                    "creditlift",
+                                    "credilift courtage",	
+                                    " creditlift courtage",
+                                    "credit lift courtage",
+                                    "credit  agricole centre",
+                                    "credit agricole",
+                                    "credit agricole du nord",
+                                    "credit agricole alpes",
+                                    "credit agricole aquitaine",
+                                    "caisse regionale de credi",
+                                    "credit lift", 
+                                    "c.r. credit agricole",
+                                    "creditlift courtage",
+                                    "caisse regionale du",
+                                    "ca consumer",
+                                    "credit lift - ca",
+                                    "cacf credit lift", 
+                                    "ca consumer finance", 
+                                    "cacf - credit lift",
+                                    "ca consumer finance ",
+                                    "credit agricole du", 
+                                    "ca cf", 
+                                    "ca consumer credit lift", 
+                                    "ca du centre ouest",
+                                    "credit agricole lorraine",
+                                    "ca sud rhone alpes",
+                                    "cacf  creditlift ", 
+                                    "creditlift courtage ca", 
+                                    "creditlift ", 
+                                    "credit agricole consumer ",
+                                    "creditagricole consumer f", 
+                                    "cacp", 
+                                    "cacf- creditlift courtage",
+                                    "credit agricole finistere",
+                                    "credit agricole provence", 
+                                    "cacf credilift courtage", 
+                                    "cacf creditlift courtage ",
+                                    "credit lift courtage rn", 
+                                    "creditlift  ca consumer"
+), banque := "credit agricole"]
+
+tbl.contrat_garanties[banque %in% c("bnp paribas",
+                                    "bnp paribas personal", 
+                                    "bnp paribas personnal", 
+                                    "cetelem  bnp paribas",
+                                    "bnp paribas ",
+                                    "bnp  paribas personal",
+                                    "bnp paris personal",
+                                    "bnp paribas personal fina", 
+                                    "bnp personal finance",
+                                    "bnp paribas sygma banque", 
+                                    "sygma banque", 
+                                    "bnpparibas personal finan", 
+                                    "bnp sygma",
+                                    "bnp paribas personal     ",
+                                    "bnp paribas pf",
+                                    "sygma", 
+                                    "sygma  bnp paribas", 
+                                    "bnp pf", 
+                                    "bnp paribas finance"), banque := "bnp paribas"]
+
+
+
+
+tbl.contrat_garanties[banque %in% c("ge money bank",
+                                    "gemb", 
+                                    "my money bank", 
+                                    "mymb", 
+                                    "my money bank tour",
+                                    "my money banck",
+                                    "my moneybank",
+                                    "ge money banque", 
+                                    "ge money banque "), banque := "money bank"]
+
+tbl.contrat_garanties[banque %in% c("credit mutuel",
+                                    "caisse credit mutuel",
+                                    "credit mutuel besancon",
+                                    "credit mutuel de",
+                                    "credit mutuel sud ouest",
+                                    "credit mutuel de bretagne",
+                                    "credit mutuel ",
+                                    "ccm thury harcourt", 
+                                    "credit mutuel enseignant",
+                                    "caisse de credit mutuel",
+                                    "ccm outre foret", 
+                                    "credit mutuel de loutre"), banque := "credit mutuel"]
+
+tbl.contrat_garanties[banque %in% c("cfcal",
+                                    "cfcal banque",
+                                    "credit foncier communal",
+                                    "credit foncier et communa"), banque := "cfcal"]
+
+tbl.contrat_garanties[banque %in% c("younited",
+                                    "younited credit"
+), banque := "younited"]
+
+tbl.contrat_garanties[banque %in% c("banque royal st georges",
+                                    "royal saint georges",
+                                    "banque royal saintgeorges",
+                                    "royal st georges banque",
+                                    "georges",
+                                    "banque royal st georges -"
+), banque := "royal st georges"]
+
+tbl.contrat_garanties[banque %in% c("bpi",
+                                    "bpi aerios",
+                                    "aerios bpi", 
+                                    "bpi france financement", 
+                                    "bpi france finance", 
+                                    "bpifrance", "bpi france",
+                                    "banque bpi", 
+                                    "bpi france direction racgi", "bpifrance financement"
+), banque := "bpi"]
+
+
+tbl.contrat_garanties[banque %in% c("ing",
+                                    "ing direct",
+                                    "ing bank"
+), banque := "ing"]
+
+tbl.contrat_garanties[banque %in% c("boursorama",
+                                    "boursorama banque"
+), banque := "boursorama"]
+
+
+rachat_credit <- c("creatis", "cfcal", "credit agricole", "money bank", "cgi", "bpi", "royal st georges")
+
+
+tbl.contrat_garanties <- tbl.contrat_garanties %>%
+  mutate(rachat.credit = ifelse(banque %in% rachat_credit, 1, 0))
+
+tbl.contrat_garanties$rachat.credit <- as.factor(tbl.contrat_garanties$rachat.credit)
+
+# on ajoute cette variable dans la table sinistreITT
+
+tbl.sinistreITT <- merge(x = tbl.sinistreITT, 
+                         y = tbl.contrat_garanties[, c(1, 42)], 
+                         by.x = 'idtadh', 
+                         by.y = 'idtAdh')
+
+tbl.sinistreITT$rachat.credit <- as.factor(tbl.sinistreITT$rachat.credit)
+
+# on merge avec les informations importantes (sur les capitaux notamment)
+
+tbl.contrat_garanties <- merge(x = tbl.contrat_garanties,
+                               y = tbl.contrat_options[, c(1, 60:63)], 
+                               by.x = "idtAdh", 
+                               by.y = "idtAdh")
+
+
+# taux de sinistralite pour les rachats de credits 
+
+tbl.contrat_ITT <- merge(x = tbl.contrat_ITT, 
+                         y = tbl.contrat_garanties[, c(1, 42)],
+                         by.x = "idtAdh", 
+                         by.y = "idtAdh")
+
+tbl.sinistreITT.rac <- tbl.sinistreITT[rachat.credit == '1']
+
+# Calcul des expositions
+tbl.contrat_ITT_expo.rac <- expositions(tbl.contrats.expo = tbl.contrat_ITT[rachat.credit == '1'],
+                                        date.debut.calcul.expo = date.debut.calcul.expo,
+                                        date.fin.calcul.expo = date.fin.calcul.expo,
+                                        periodicite = 'years')
+
+# Calcul du taux
+resultat.rac <- ITT_annees(tbl.sinistreITT.rac)
+sinistralite.totale.rac = sum(resultat.rac$nombre_sinistres)/sum(tbl.contrat_ITT_expo.rac$exposition)
+sinistralite.totale.rac*100
+
+
+# Taux de sinistralite pour les non rachats de credits
+
+
+tbl.sinistreITT.nrac <- tbl.sinistreITT[rachat.credit == '0']
+
+# Calcul des expositions 
+tbl.contrat_ITT_expo.nrac <- expositions(tbl.contrats.expo = tbl.contrat_ITT[rachat.credit == '0'],
+                                         date.debut.calcul.expo = date.debut.calcul.expo,
+                                         date.fin.calcul.expo = date.fin.calcul.expo,
+                                         periodicite = 'years')
+
+# Calcul du taux
+resultat.nrac <- ITT_annees(tbl.sinistreITT.nrac)
+sinistralite.totale.nrac = sum(resultat.nrac$nombre_sinistres)/sum(tbl.contrat_ITT_expo.nrac$exposition)
+sinistralite.totale.nrac*100
+
+# Creation de la table avec les informations des assures pour l'entrainement des modèles
+
+tbl.infoassures <- merge(x = tbl.contrat.sinsitreITT, 
+                         y = tbl.sinistres, 
+                         by.x = "idtAdh",
+                         by.y = "idtadh",
+                         all.x = TRUE)
+
+tbl.infoassures <- merge(x = tbl.infoassures, 
+                         y = tbl.contrat_garanties[, c(1, 42)], 
+                         by.x = 'idtAdh', 
+                         by.y = 'idtAdh',)
+
+tbl.infoassures[, sinistreITT := as.factor(sinistreITT)]
+tbl.infoassures[, IsFumeur.y := as.factor(IsFumeur.y)]
+
+
+# Table sans les doublons (fin de l'episode avec la distance de Levenshtein)
+tbl.assures3 <- merge(x = tbl.dedoubl.assures,
+                      y = tbl.assures[, c(1,2,3,9,10)],
+                      by.x = "Code.Personne.Gestass1",
+                      by.y = "CodPers")
+
+
+
+############################################-
+# Modèles de regressions                   #----
+############################################-
+
+
+
+
+
+
+# regression sur le nombre de sinistres
+
+tbl.contrat_ITT_sumexpo <- tbl.contrat_ITT_expo%>%group_by(idtAdh)%>%summarise(somme_expo = sum(exposition), somme.sinistres = sum(n.sinistres))
+
+tbl.contrat_ITT_sumexpo <- merge(x = tbl.contrat_ITT_sumexpo, 
+                                 y = tbl.infoassures[, c(1, 35, 41, 45)], 
+                                 by.x = "idtAdh", 
+                                 by.y = "idtAdh")
+
+
+set.seed(1999)
+sample2 <- sample(c(TRUE, FALSE), nrow(tbl.contrat_ITT_sumexpo), replace=TRUE, prob=c(0.8,0.2))
+train.nsinistres  <- tbl.contrat_ITT_sumexpo[sample2, ]
+test.nsinistres   <- tbl.contrat_ITT_sumexpo[!sample2, ]
+
+
+summary(train.nsinistres)
+summary(test.nsinistres)
+
+
+# Prise en compte de l'âge par periode d'exposition pour visuliser et quantifier l'effet âge
+
+# on va calculer l'age pour chaque periode d'exposition
+
+tbl.contrat_ITT_expo <- merge(x = tbl.contrat_ITT_expo,
+                              y = tbl.infoassures[, c(1, 38,42:45)],
+                              by.x = "idtAdh",
+                              by.y = "idtAdh")
+
+# on supprime les expositions egales à 0
+
+tbl.contrat_ITT_expo <- tbl.contrat_ITT_expo[exposition > 0]
+
+tbl.contrat_ITT_expo <- tbl.contrat_ITT_expo%>%mutate(age.expo = year(debut.periode) - year(Date.Naissance.Assure1))
+
+tbl.contrat_ITT_expo$IsFumeur.y <- as.factor(tbl.contrat_ITT_expo$IsFumeur.y)
+
+
+# modèle de regression logistique avec l'age par exposition
+
+#set.seed(1999)
+#sample6 <- sample(c(TRUE, FALSE), nrow(tbl.contrat_ITT_expo), replace=TRUE, prob=c(0.8,0.2))
+#train.modele.agexp  <- tbl.contrat_ITT_expo[sample6, ]
+#test.modele.agexp   <- tbl.contrat_ITT_expo[!sample6, ]
+
+
+# entrainement du modèle 
+#modele.agexp <- glm(formula = sinistreITT ~ I(age.expo^2)+age.expo + IsFumeur.y + rachat.credit + capitaux + offset(log(exposition)), data = train.modele.agexp, family = binomial(link = "logit"))
+#summary(modele.agexp)
+#plot(modele.agexp)
+# prediction
+#predictions_agexp <- predict(modele.agexp, newdata = test.modele.agexp, type = "response")
+
+#test_agexp <- cbind(test.modele.agexp, predictions_agexp)
+
+#predict_age_a_exp <-test_agexp[, .(nb_sinistre_predit = sum(predictions_agexp), nb_sinistre_reel = sum(as.numeric(sinistreITT)-1), nb_observations = .N), by = c("IsFumeur.y", "rachat.credit", "capitaux")]
+
+# distances du khi-deux entre la prediction et le reel
+
+#tableau.predictions_agexp <- predict_age_a_exp%>%mutate(chi_deux_reel = (nb_sinistre_predit - nb_sinistre_reel)^2 / nb_sinistre_reel)
+
+# difference entre la prediction et le nombre de sinistres reels
+
+#tableau.predictions_agexp <- predict_age_a_exp%>%mutate(exp_diff = (nb_sinistre_predit - nb_sinistre_reel))
+
+# representation graphique des effets des variables
+
+#plot(allEffects(modele.agexp))
+
+#plot(predictorEffects(modele.agexp))
+
+# l'ecart entre les predictions et les chiffres reels sont très faibles. Les coefficients sont significatifs (tous avec une p-value < 0.05)
+#summary(modele.agexp)
+#plot(allEffects(modele.agexp))
+#roc_obj <- roc(test.modele.agexp$sinistreITT, predictions_agexp)
+#plot(roc_obj)
+#auc(test.modele.agexp$sinistreITT, predictions_agexp)
+
+
+# Deuxième approche avec des tranches d'age à l'exposition
+
+tbl.contrat_ITT_expo$tranches.agexp <- cut(tbl.contrat_ITT_expo$age.expo, 
+                                           breaks = c(18,30,40,45,50,55,60,100), 
+                                           labels = c("18-30", "31-40", "41-45", "46-50", "51-55", "56-60", "60+"))
+
+
+set.seed(1999) # on veut que le tirage des ensembles de test et d'entrainement soit le même à chaque fois
+sample7 <- sample(c(TRUE, FALSE), nrow(tbl.contrat_ITT_expo), replace=TRUE, prob=c(0.8,0.2))
+train.modele.trancheagexp  <- tbl.contrat_ITT_expo[sample7, ]
+test.modele.trancheagexp   <- tbl.contrat_ITT_expo[!sample7, ]
+
+
+# entrainement du modèle 
+modele.trancheagexp <- glm(formula = sinistreITT ~ tranches.agexp + IsFumeur.y + rachat.credit + capitaux + offset(log(exposition)), 
+                           data = train.modele.trancheagexp, 
+                           family = binomial(link = "logit"))
+
+# Resultats du modèle
+summary(modele.trancheagexp)
+
+# prediction
+predictions_trancheagexp <- predict(modele.trancheagexp, newdata = test.modele.trancheagexp, type = "response")
+
+test_trancheagexp <- cbind(test.modele.trancheagexp, predictions_trancheagexp)
+
+predict_trancheage_a_exp <-test_trancheagexp[, .(nb_sinistre_predit = sum(predictions_trancheagexp), nb_sinistre_reel = sum(as.numeric(sinistreITT)-1), nb_observations = .N), by = c("IsFumeur.y", "rachat.credit", "capitaux")]
+
+# distances du khi-deux entre la prediction et le reel
+
+tableau.predictions_trancheagexp <- predict_trancheage_a_exp%>%mutate(chi_deux_reel = (nb_sinistre_predit - nb_sinistre_reel)^2 / nb_sinistre_reel)
+
+# difference entre la prediction et le nombre de sinistres reels
+
+tableau.predictions_trancheagexp <- predict_trancheage_a_exp%>%mutate(exp_diff = (nb_sinistre_predit - nb_sinistre_reel), ratio = nb_sinistre_predit/nb_sinistre_reel)
+
+# representation graphique des effets des variables
+
+plot(allEffects(modele.trancheagexp))
+
+plot(predictorEffects(modele.trancheagexp))
+
+# l'ecart entre les predictions et les chiffres reels sont très faibles. Les coefficients sont significatifs (tous avec une p-value < 0.05)
+summary(modele.trancheagexp)
+plot(allEffects(modele.trancheagexp),ylim = qlogis(seq(0.001, 0.05, by = 0.04)))
+
+# Courbe ROC et AUC
+roc_obj <- roc(test_trancheagexp$sinistreITT, predictions_trancheagexp)
+plot(roc_obj)
+auc(test_trancheagexp$sinistreITT, predictions_trancheagexp)
+
+gc()
+# Fonction de cout afin de calculer l'AUC moyen et l'AUC ajustee du modèle
+auc_cost1.1 <- function(observed, predicted) {
+  auc_value <- roc(test_trancheagexp$sinistreITT, predictions_trancheagexp)$auc
+  return(1 - auc_value) 
+}
+
+# Nombre de subdivisions de la base de donnees
+k <- 10 
+
+# Fonction de validation croisee et calcul de l'AUC moyenne et l'AUC ajustee
+cv_result1.1 <- cv.glm(tbl.contrat_ITT_expo, modele.trancheagexp, auc_cost1.1 ,K = k)
+average_auc1.1 <- 1 - cv_result1.1$delta[1]
+adjust_auc1.1 <- 1 - cv_result1.1$delta[2]
+
+# plot(modele.trancheagexp)
+
+
+# Visualisation des probabilites
+
+u <- allEffects(modele.trancheagexp)
+
+u <- effect(term = "capitaux", modele.trancheagexp)
+
+u <- as.data.frame(u)
+
+ggplot(u, aes(  x= capitaux , y = fit))+geom_point() + geom_boxplot()+
+  labs(y = "Effet", x = "Capitaux") + ylim(0,0.03) + theme_bw()+ ggtitle("Probabilite d'ITT en fonction de la variable Capitaux")
+
+#################################-
+# Clustering                    #----
+#################################-
+
+
+# Profil type du sinistre
+
+# segementation des sinistres
+
+
+# tbl.cap.age.presta.fum.rac <- tbl.sinistreITT[, c("age_au_sinistre", "IsFumeur", "capitaux", "rachat.credit")]
+
+
+# matrice <- as.matrix(tbl.cap.age.presta.fum.rac)
+
+# distance <- dist(matrice)
+
+# clusters <- hclust(distance, method = "ward.D2")
+# plot(clusters)
+
+# nb.clust <- cutree(clusters, k = 4)
+
+# rect.hclust(clusters,4,border="red") #encadre les groupes deduit de la segmentation
+# tbl.sinistreITT$clusters <- as.factor(nb.clust)
+
+# ggplot(tbl.sinistreITT, aes(x = nb.clust, y = age_au_sinistre, fill = nb.clust)) +
+#   geom_boxplot() +
+#   labs(title = "Repartition de l'âge par cluster", x = "Cluster", y = "Âge")
+
+# Visualisation des differences du cpital initial par cluster
+# ggplot(tbl.sinistreITT, aes(x = nb.clust, y = capital2023, fill = nb.clust)) +
+#   geom_boxplot() +
+#   labs(title = "Repartition du capital initial par cluster", x = "Cluster", y = "Capital Initial (euros)")
+
+
+# tbl_summary(tbl.sinistreITT[, c(5, 8, 9, 11, 12)], by = clusters)
+
+
+
+# inertie <- sort(clusters$height, decreasing = TRUE)
+
+# plot(inertie[1:20], type = "s", xlab = "Nombre de classes", ylab = "Inertie",lwd=2);grid()
+
+# k <- 4 # Nombre de categorie souhaite (à parametrer)
+
+# abline(v=k,col="red",lty=3)
+
+# points(k,inertie[k],pch=16,cex=2,col="red")
+
+#idendro(clusters, matrice)
+
+
+
+# on a 4 clusters en evidence 
+
+
+# classification <- FAMD(tbl.cap.age.presta.fum.rac)
+# cah2 <- HCPC(classification, nb.clust = 4, graph =TRUE)
+# cah2$desc.var
+
+
+
+#############################################-
+# Prise en compte des donnees geographiques #----
+#############################################-
+
+
+# ajout des variables geographiques
+
+tbl.contrat_ITT_expo <- merge(x = tbl.contrat_ITT_expo,
+                              y = tbl.assures3,
+                              by.x = "CodAss",
+                              by.y = "Code.Personne.Gestass1")
+
+
+
+
+# Calcul du taux de sinistralite par departements
+frequence_sinistre <- tbl.contrat_ITT_expo %>%
+  group_by(departmt, LibDept) %>%
+  summarise(
+    total_sinistres = sum(n.sinistres),       # Total des sinistres ITT par departement
+    total_exposition = sum(exposition),        # Total de la periode d'exposition par departement
+    frequence = total_sinistres / total_exposition  # Frequence de sinistre ITT
+  )
+
+
+
+####################################################-
+# Entrainement d'un modèle sur les couvertures MNO #----
+####################################################-
+
+# Application de la fonction sur les couvertures MNO
+
+tbl.contrat_ITT_expo <- couverture_MNO(tbl.contrat_ITT_expo)
+
+# Entrainement du modèle
+
+set.seed(1999) # on veut que le tirage des ensembles de test et d'entrainement soit le même à chaque fois
+sample11 <- sample(c(TRUE, FALSE), nrow(tbl.contrat_ITT_expo), replace=TRUE, prob=c(0.8,0.2))
+train.modele.mno  <- tbl.contrat_ITT_expo[sample11, ]
+test.modele.mno   <- tbl.contrat_ITT_expo[!sample11, ]
+
+modele.mno <- glm(sinistreITT ~ capitaux + rachat.credit + IsFumeur.y + tranches.agexp + couverture_mno +  offset(log(exposition)),
+                  data = train.modele.mno,
+                  family = binomial(link = "logit"))
+
+summary(modele.mno)
+
+# Predictions du modèle
+predictions_mno <- predict(modele.mno, newdata = test.modele.mno, type = "response")
+
+test_mno <- cbind(test.modele.mno, predictions_mno)
+# Ecart entre le nombre de sinistres predits et reels
+predict_mno <-test_mno[, .(nb_sinistre_predit = sum(predictions_mno), nb_sinistre_reel = sum(as.numeric(sinistreITT)-1), nb_observations = .N), by = c("couverture_mno", "IsFumeur.y", "rachat.credit")]
+
+# Courbe ROC et AUC
+roc_obj_mno <- roc(test_mno$sinistreITT, predictions_mno)
+plot(roc_obj_mno)
+auc(test_mno$sinistreITT, predictions_mno)
+
+# Fonction de cout afin de calculer l'AUC moyen et l'AUC ajustee du modele
+auc_cost1.2 <- function(observed, predicted) {
+  auc_value <- roc(test_mno$sinistreITT, predictions_mno)$auc
+  return(1 - auc_value) 
+}
+
+# Nombre de subdivisions de la base de donnees
+k <- 10 
+
+# Fonction de validation croisee et calcul de l'AUC moyenne et l'AUC ajustee
+cv_result1.2 <- cv.glm(tbl.contrat_ITT_expo, modele.trancheagexp, auc_cost1.2 ,K = k)
+average_auc1.2 <- 1 - cv_result1.2$delta[1]
+adjust_auc1.2 <- 1 - cv_result1.2$delta[2]
+
+##########################################################-
+# Modèles de regression avec les variables geographiques #----
+##########################################################-
+
+
+
+# Calcul des taux de sinistralite par regions
+
+tbl.contrat_ITT_expo[departmt %in% c("1", 
+                                        "3",
+                                        "7",
+                                        "15",
+                                        "26",
+                                        "38",
+                                        "42",
+                                        "43", 
+                                        "63",
+                                        "69", 
+                                        "73", 
+                                        "74")
+                     , region := "Auvergne Rhone Alpes"]
+
+tbl.contrat_ITT_expo[departmt %in% c("2", 
+                                        "59",
+                                        "60",
+                                        "62", 
+                                        "80"), region := "Hauts de France"]
+
+tbl.contrat_ITT_expo[departmt %in% c("4", 
+                                        "5",
+                                        "6",
+                                        "13",
+                                        "83",
+                                        "84")
+                     , region := "Provence Alpes Côte d'Azur"]
+
+tbl.contrat_ITT_expo[departmt %in% c("8",
+                                        "10",
+                                        "51",
+                                        "52",
+                                        "54",
+                                        "55",
+                                        "57",
+                                        "67",
+                                        "68",
+                                        "88"),
+                     region := "Grand Est"]
+
+tbl.contrat_ITT_expo[departmt %in% c("9",
+                                        "11",
+                                        "12",
+                                        "30",
+                                        "31",
+                                        "32",
+                                        "34",
+                                        "46",
+                                        "48",
+                                        "65",
+                                        "66",
+                                        "81",
+                                        "82"), region := "Occitanie"]
+
+tbl.contrat_ITT_expo[departmt %in% c("14",
+                                        "27",
+                                        "50",
+                                        "61",
+                                        "76"), region := "Normandie"]
+
+tbl.contrat_ITT_expo[departmt %in% c("16",
+                                        "17",
+                                        "19",
+                                        "23",
+                                        "24",
+                                        "33",
+                                        "40",
+                                        "47",
+                                        "64",
+                                        "79",
+                                        "86",
+                                        "87",
+                                        "81"), region := "Nouvelle-Aquitaine"]
+
+
+tbl.contrat_ITT_expo[departmt %in% c("18",
+                                        "28",
+                                        "36",
+                                        "37",
+                                        "41",
+                                        "45"), region := "Centre Val de Loire"]
+
+tbl.contrat_ITT_expo[departmt %in% c("85",
+                                        "72",
+                                        "53",
+                                        "49",
+                                        "44"), region := "Pays de la Loire"]
+
+tbl.contrat_ITT_expo[departmt %in% c("21",
+                                        "25",
+                                        "39",
+                                        "58",
+                                        "70",
+                                        "71",
+                                        "89",
+                                        "90"), region := "Bourgogne Franche Comte"]
+
+tbl.contrat_ITT_expo[departmt %in% c("78",
+                                        "75",
+                                        "91",
+                                        "92",
+                                        "93",
+                                        "94",
+                                        "95",
+                                        "77"), region := "Ile de France"]
+
+tbl.contrat_ITT_expo[departmt %in% c("22",
+                                        "29",
+                                        "35",
+                                        "56"), region := "Bretagne"]
+
+tbl.contrat_ITT_expo[departmt %in% c("20"), region := "Corse"]
+tbl.contrat_ITT_expo[departmt %in% c("97",
+                                     "98",
+                                     "99"), region := "Outre-Mer et Etranger"]
+
+
+frequence_sinistre.region <- tbl.contrat_ITT_expo %>%
+  group_by(region) %>%
+  summarise(
+    total_sinistres = sum(n.sinistres),       # Total des sinistres ITT par departement
+    total_exposition = sum(exposition),        # Total de la periode d'exposition par departement
+    frequence = total_sinistres / total_exposition  # Frequence de sinistre ITT
+  )
+
+# Types de commune (aire urbaine ou non) ----
+
+# ici, faire tourner le script "aire urbaine" dans le répertoire indiqué au début !!!!!!!
+
+
+tbl.contrat_ITT_expo <- merge(x = tbl.contrat_ITT_expo,
+                              y = tbl.type_zone_cod[, c(2, 4, 5, 9)],
+                              by.x = "burDis",
+                              by.y = "Libelle geographique")
+
+tbl.contrat_ITT_expo$SexeAss <- as.factor(tbl.contrat_ITT_expo$SexeAss)
+
+tbl.contrat_ITT_expo <- subset(tbl.contrat_ITT_expo, SexeAss != "StÃ©")
+colnames(tbl.contrat_ITT_expo)[64] <- c("TypeCommune")
+# Debut du modèle (plus ou moins complet)
+
+set.seed(1999)
+sample12 <- sample(c(TRUE, FALSE), nrow(tbl.contrat_ITT_expo), replace=TRUE, prob=c(0.8,0.2))
+train.modele.reg  <- tbl.contrat_ITT_expo[sample12, ]
+test.modele.reg  <- tbl.contrat_ITT_expo[!sample12, ]
+
+modele.reg <- glm(sinistreITT ~ capitaux + 
+                    rachat.credit + 
+                    IsFumeur.y + 
+                    tranches.agexp + 
+                    couverture_mno + 
+                    region + 
+                    TypeCommune + 
+                    SexeAss + 
+                    offset(log(exposition)),
+                  data = train.modele.reg,
+                  family = binomial(link = "logit"))
+
+summary(modele.reg)
+
+# Predictions du modèle
+predictions_reg <- predict(modele.reg, newdata = test.modele.reg, type = "response")
+
+test_reg <- cbind(test.modele.reg, predictions_reg)
+
+# Ecart entre le nombre de sinistres predits et reels
+predict_reg <-test_reg[, .(nb_sinistre_predit = sum(predictions_reg), nb_sinistre_reel = sum(as.numeric(sinistreITT)-1), nb_observations = .N), by = c("region")]
+
+# Courbe ROC et AUC
+roc_obj_reg <- roc(test_reg$sinistreITT, predictions_reg)
+plot(roc_obj_reg)
+auc(test_reg$sinistreITT, predictions_reg)
+
+
+# Nouvelle modalite de reference pour les regions
+tbl.contrat_ITT_expo[region %in% c("Normandie",
+                                   "Auvergne Rhone Alpes"),
+                                   region := "Modalite de Reference"]
+
+# On fixe la modalite de reference
+tbl.contrat_ITT_expo$region <- as.factor(tbl.contrat_ITT_expo$region)
+tbl.contrat_ITT_expo$region <- relevel(tbl.contrat_ITT_expo$region , ref = "Modalite de Reference")
+
+
+
+# Re entrainement du modèle
+set.seed(1999)
+sample13 <- sample(c(TRUE, FALSE), nrow(tbl.contrat_ITT_expo), replace=TRUE, prob=c(0.8,0.2))
+train.modele.complet  <- tbl.contrat_ITT_expo[sample13, ]
+test.modele.complet  <- tbl.contrat_ITT_expo[!sample13, ]
+
+
+modele.complet <- glm(sinistreITT ~ capitaux + 
+                        rachat.credit + 
+                        IsFumeur.y + 
+                        tranches.agexp + 
+                        region + 
+                        TypeCommune + 
+                        couverture_mno + 
+                        offset(log(exposition)),
+                  data = train.modele.complet,
+                  family = binomial(link = "logit"))
+
+summary(modele.complet)
+
+# Predictions du modèle
+predictions_complet <- predict(modele.complet, newdata = test.modele.complet, type = "response")
+
+test_complet <- cbind(test.modele.complet, predictions_complet)
+
+predict_complet <-test_complet[, .(nb_sinistre_predit = sum(predictions_complet), nb_sinistre_reel = sum(as.numeric(sinistreITT)-1), nb_observations = .N), by = c("region")]
+
+predict_complet <- predict_complet[-14,]
+
+# Courbe ROC et AUC
+roc_obj_complet <- roc(test_complet$sinistreITT, predictions_complet)
+plot(roc_obj_complet)
+auc(test_complet$sinistreITT, predictions_complet)
+
+# Fonction de cout afin de calculer l'AUC moyen et l'AUC ajustee du modèle
+auc_cost1.3 <- function(observed, predicted) {
+  auc_value <- roc(test_complet$sinistreITT, predictions_complet)$auc
+  return(1 - auc_value) 
+}
+
+# Nombre de subdivisions de la base de donnees
+k <- 10 
+
+# Fonction de validation croisee et calcul de l'AUC moyenne et l'AUC ajustee
+cv_result1.3 <- cv.glm(tbl.contrat_ITT_expo, modele.complet, auc_cost1.3 ,K = k)
+average_auc1.3 <- 1 - cv_result1.3$delta[1]
+adjust_auc1.3 <- 1 - cv_result1.3$delta[2]
+
+# Ajout de la variable age du contrat (et je renomme la variable type de commune qui pose soucis)
+
+tbl.contrat_ITT_expo$age_contrat <- year(tbl.contrat_ITT_expo$debut.periode)- year(tbl.contrat_ITT_expo$debut.garantie) + 1
+
+
+############################################################################-
+# Modele avec l'age du contrat sur cette table avec l'exposition par annee #----
+############################################################################-
+
+
+
+set.seed(1999)
+sample16 <- sample(c(TRUE, FALSE), nrow(tbl.contrat_ITT_expo), replace=TRUE, prob=c(0.8,0.2))
+train.modele.complet.age  <- tbl.contrat_ITT_expo[sample16, ]
+test.modele.complet.age  <- tbl.contrat_ITT_expo[!sample16, ]
+
+modele.complet.age <- glm(sinistreITT ~ capitaux + 
+                        rachat.credit + 
+                        IsFumeur.y + 
+                        tranches.agexp + 
+                        region + 
+                        TypeCommune + 
+                        couverture_mno +
+                          age_contrat +
+                        offset(log(exposition)),
+                      data = train.modele.complet.age,
+                      family = binomial(link = "logit"))
+
+summary(modele.complet.age)
+
+# Predictions du modèle
+predictions_complet.age <- predict(modele.complet.age, newdata = test.modele.complet.age, type = "response")
+
+test_complet.age <- cbind(test.modele.complet.age, predictions_complet.age)
+
+predict_complet.age <-test_complet.age[, .(nb_sinistre_predit = sum(predictions_complet.age), nb_sinistre_reel = sum(as.numeric(sinistreITT)-1), nb_observations = .N), by = c("age_contrat")]
+
+# predict_complet.age <- predict_complet.age[-14,]
+
+# Courbe ROC et AUC
+roc_obj_complet.age <- roc(test_complet.age$sinistreITT, predictions_complet.age)
+plot(roc_obj_complet.age)
+auc(test_complet.age$sinistreITT, predictions_complet.age)
+
+
+proba <- allEffects(modele.complet.age)
+
+# odds-ratio du modele
+
+odds.ratio.modele.complet <- data.table(variables = c("capitauxmoyen",
+                                                      "capitauxmoyen +", 
+                                                      "capitauximportant",
+                                                      "capitauxtres grand",
+                                                      "rachat.credit1",
+                                                      "IsFumeur1", 
+                                                      "tranches.agexp31-40",
+                                                      "tranches.agexp41-45",
+                                                      "tranches.agexp46-50",
+                                                      "tranches.agexp51-55", 
+                                                      "tranches.agexp56-60", 
+                                                      "tranches.agexp60+", 
+                                                      "Auvergne Rhone Alpes",
+                                                      "Bretagne", 
+                                                      "Centre Val de Loire", 
+                                                      "Corse", 
+                                                      "Grand Est", 
+                                                      "Hauts de France", 
+                                                      "Ile de France", 
+                                                      "Nouvelle-Aquitaine", 
+                                                      "Occitanie", 
+                                                      "Outre-Mer et Etranger", 
+                                                      "Unite urbaine", 
+                                                      "couverture_mno",
+                                                      "age_contrat"),
+                                        odds.ratio = c("1.47531770", 
+                                                       "1.37526871", 
+                                                       "1.32124060", 
+                                                       "0.59044895", 
+                                                       "1.45407039", 
+                                                       "1.21441316", 
+                                                       "0.99607747", 
+                                                       "1.12702409", 
+                                                       "1.42759882", 
+                                                       "1.93995192", 
+                                                       "2.50022908", 
+                                                       "2.05765982", 
+                                                       "0.96667193", 
+                                                       "1.57916495", 
+                                                       "0.74256212", 
+                                                       "2.93636235", 
+                                                       "0.92301800", 
+                                                       "1.24207211", 
+                                                       "0.43486550", 
+                                                       "0.80583828", 
+                                                       "0.82114730", 
+                                                       "0.62511024", 
+                                                       "0.59949855", 
+                                                       "1.07790179",
+                                                       "1.008781"))
+
+
+# On retire les NA des bases de donnees pour appliquer la validation croisee
+
+tbl.contrat_ITT_expo <- tbl.contrat_ITT_expo[!is.na(tbl.contrat_ITT_expo$tranches.agexp)]
+tbl.contrat_ITT_expo <- tbl.contrat_ITT_expo[!is.na(tbl.contrat_ITT_expo$region)]
+
+
+############################################-
+# Validation croisee sur le modèle complet #----
+############################################-
+
+
+train.control <- trainControl(method = "cv", number = 10)
+
+model <- train(sinistreITT ~ capitaux + 
+                  rachat.credit + 
+                  IsFumeur.y + 
+                  tranches.agexp + 
+                  region + 
+                  TypeCommune + 
+                  couverture_mno + 
+                 age_contrat +
+                  offset(log(exposition)),
+               data = tbl.contrat_ITT_expo, method = "glm",
+               trControl = train.control)
+
+print(model)
+
+# Bon d'accord mais ca nous avance pas à grand chose faut comparer les AUC ce sera bien plus parlant !
+# D'accord alors c'est parti 
+
+
+# Fonction de cout afin de calculer l'AUC moyen et l'AUC ajustee du modèle
+auc_cost1.4 <- function(observed, predicted) {
+  auc_value <- roc(test_complet.age$sinistreITT, predictions_complet.age)$auc
+  return(1 - auc_value) 
+}
+
+# Nombre de subdivisions de la base de donnees
+k <- 10 
+
+# Fonction de validation croisee et calcul de l'AUC moyenne et l'AUC ajustee
+cv_result1.4 <- cv.glm(tbl.contrat_ITT_expo, modele.complet.age, auc_cost1.4 ,K = k)
+average_auc1.4 <- 1 - cv_result1.4$delta[1]
+adjust_auc1.4 <- 1 - cv_result1.4$delta[2]
+
+
+##########################################################################-
+# nouveau modèle avec des tranches d'âge de contrat (< 3 ans et > 3 ans) #----
+##########################################################################-
+
+
+# creation de la variable
+tbl.contrat_ITT_expo$tranche.age.contrat <- cut(tbl.contrat_ITT_expo$age_contrat, 
+                                           breaks = c(0, 3, Inf), 
+                                           labels = c("< 3 ", "> 3"))
+tbl.contrat_ITT_expo$TypeCommune <- as.factor(tbl.contrat_ITT_expo$TypeCommune)
+tbl.contrat_ITT_expo$couverture_mno <- as.factor(tbl.contrat_ITT_expo$couverture_mno)
+# entrainement du modèle
+set.seed(1999)
+sample17 <- sample(c(TRUE, FALSE), nrow(tbl.contrat_ITT_expo), replace=TRUE, prob=c(0.8,0.2))
+train.modele.complet.tage  <- tbl.contrat_ITT_expo[sample17, ]
+test.modele.complet.tage  <- tbl.contrat_ITT_expo[!sample17, ]
+
+modele.complet.tage <- glm(sinistreITT ~  
+                            rachat.credit + 
+                            IsFumeur.y + 
+                            tranches.agexp + 
+                            TypeCommune + 
+                            couverture_mno +
+                            tranche.age.contrat+
+                            offset(log(exposition)),
+                          data = train.modele.complet.tage,
+                          family = binomial(link = "logit"))
+
+summary(modele.complet.tage)
+
+# Predictions du modèle
+predictions_complet.tage <- predict(modele.complet.tage, newdata = test.modele.complet.tage, type = "response")
+
+test_complet.tage <- cbind(test.modele.complet.tage, predictions_complet.tage)
+
+predict_complet.tage <-test_complet.tage[, .(nb_sinistre_predit = sum(predictions_complet.tage), nb_sinistre_reel = sum(as.numeric(sinistreITT)-1), nb_observations = .N), by = c("region")]
+
+# predict_complet.age <- predict_complet.age[-14,]
+
+# Courbe ROC et AUC
+roc_obj_complet.tage <- roc(test_complet.tage$sinistreITT, predictions_complet.tage)
+plot(roc_obj_complet.tage)
+auc(test_complet.tage$sinistreITT, predictions_complet.tage)
+
+
+# validation croisée 
+auc_cost1.5 <- function(observed, predicted) {
+  auc_value <- roc(test_complet.tage$sinistreITT, predictions_complet.tage)$auc
+  return(1 - auc_value) 
+}
+k <- 10  
+cv_result1.5 <- cv.glm(tbl.contrat_ITT_expo, modele.complet.tage, auc_cost1.5,K = k)
+cv_result1.5$delta
+average_auc1.5 <- 1 - cv_result1.5$delta[1]
+adjust_auc1.5 <- 1 - cv_result1.5$delta[2]
+
+# On doit soustraire les valeurs obtenues de 1 afin d'avoir l'AUC moyenne et l'AUC ajustee
+# On a donc un AUC moyen de 0.65214 ce qui n'est pas si mal que ca
+
+
+################################################-
+# Un peu de saisonnalite maintenant ? Allez go #----
+################################################-
+
+
+tbl.contrat_ITT_expo.saison <- expositions(tbl.contrats.expo = tbl.contrat_ITT,
+                                           date.debut.calcul.expo = date.debut.calcul.expo,
+                                           date.fin.calcul.expo = date.fin.calcul.expo,
+                                           periodicite = "months")
+
+# On repète les jointures pour compter le nombre de sinistres par contrat
+
+tbl.contrat_ITT_expo.saison <- merge(tbl.contrat_ITT_expo.saison, 
+                              tbl.sinistreITT_unique[rang_sinistre == 1, .(idtadh, date_sinistre1 = date_sinistre)], 
+                              by.x = "idtAdh", 
+                              by.y = "idtadh", 
+                              all.x = TRUE)
+
+
+# 2.
+tbl.contrat_ITT_expo.saison <- merge(tbl.contrat_ITT_expo.saison, 
+                              tbl.sinistreITT_unique[rang_sinistre == 2, .(idtadh, date_sinistre2 = date_sinistre)], 
+                              by.x = "idtAdh", 
+                              by.y = "idtadh", 
+                              all.x = TRUE)
+
+# 3.
+tbl.contrat_ITT_expo.saison <- merge(tbl.contrat_ITT_expo.saison, 
+                              tbl.sinistreITT_unique[rang_sinistre == 3, .(idtadh, date_sinistre3 = date_sinistre)], 
+                              by.x = "idtAdh", 
+                              by.y = "idtadh", 
+                              all.x = TRUE)
+
+# Compter un sinistre que dans la periode ou il survient :
+
+tbl.contrat_ITT_expo.saison[, n.sinistres := 
+                       fcase(!is.na(date_sinistre1) & date_sinistre1 >= debut.periode
+                             & date_sinistre1 < fin.periode , 1, default = 0) +
+                       fcase(!is.na(date_sinistre2) & date_sinistre2 >= debut.periode
+                             & date_sinistre2 < fin.periode , 2, default = 0) +
+                       fcase(!is.na(date_sinistre3) & date_sinistre3 >= debut.periode
+                             & date_sinistre3 < fin.periode , 3, default = 0)
+]
+
+
+tbl.contrat_ITT_expo.saison <- merge(x = tbl.contrat_ITT_expo.saison, 
+                              y = tbl.contrat_options[, c(1, 47,48,62,63)], 
+                              by.x = "idtAdh",
+                              by.y = "idtAdh")
+
+
+# on va calculer l'age pour chaque periode d'exposition
+
+tbl.contrat_ITT_expo.saison <- merge(x = tbl.contrat_ITT_expo.saison,
+                              y = tbl.infoassures[, c(1, 38,42:45)],
+                              by.x = "idtAdh",
+                              by.y = "idtAdh")
+
+# on supprime les expositions egales à 0
+
+tbl.contrat_ITT_expo.saison <- tbl.contrat_ITT_expo.saison[exposition > 0]
+
+tbl.contrat_ITT_expo.saison <- tbl.contrat_ITT_expo.saison%>%mutate(age.expo = year(debut.periode) - year(Date.Naissance.Assure1))
+
+tbl.contrat_ITT_expo.saison$IsFumeur.y <- as.factor(tbl.contrat_ITT_expo.saison$IsFumeur.y)
+
+
+# Deuxième approche avec des tranches d'age à l'exposition
+
+tbl.contrat_ITT_expo.saison$tranches.agexp <- cut(tbl.contrat_ITT_expo.saison$age.expo, 
+                                           breaks = c(18,35,40,45,50,55,60,100), 
+                                           labels = c("18-30", "30-40", "40-45", "45-50", "50-55", "55-60", "60+"))
+
+# ajout des variables geographiques 
+
+tbl.contrat_ITT_expo.saison <- merge(x = tbl.contrat_ITT_expo.saison,
+                              y = tbl.assures3,
+                              by.x = "CodAss",
+                              by.y = "Code.Personne.Gestass1")
+
+# Application de la fonction sur les couvertures MNO
+
+tbl.contrat_ITT_expo.saison <- couverture_MNO(tbl.contrat_ITT_expo.saison)
+
+# Ajout des regions sur cette nouvelle base de donnees
+
+tbl.contrat_ITT_expo.saison[departmt %in% c("1", 
+                                     "3",
+                                     "7",
+                                     "15",
+                                     "26",
+                                     "38",
+                                     "42",
+                                     "43", 
+                                     "63",
+                                     "69", 
+                                     "73", 
+                                     "74")
+                     , region := "Auvergne Rhone Alpes"]
+
+tbl.contrat_ITT_expo.saison[departmt %in% c("2", 
+                                     "59",
+                                     "60",
+                                     "62", 
+                                     "80"), region := "Hauts de France"]
+
+tbl.contrat_ITT_expo.saison[departmt %in% c("4", 
+                                     "5",
+                                     "6",
+                                     "13",
+                                     "83",
+                                     "84")
+                     , region := "Provence Alpes Côte d'Azur"]
+
+tbl.contrat_ITT_expo.saison[departmt %in% c("8",
+                                     "10",
+                                     "51",
+                                     "52",
+                                     "54",
+                                     "55",
+                                     "57",
+                                     "67",
+                                     "68",
+                                     "88"),
+                     region := "Grand Est"]
+
+tbl.contrat_ITT_expo.saison[departmt %in% c("9",
+                                     "11",
+                                     "12",
+                                     "30",
+                                     "31",
+                                     "32",
+                                     "34",
+                                     "46",
+                                     "48",
+                                     "65",
+                                     "66",
+                                     "81",
+                                     "82"), region := "Occitanie"]
+
+tbl.contrat_ITT_expo.saison[departmt %in% c("14",
+                                     "27",
+                                     "50",
+                                     "61",
+                                     "76"), region := "Normandie"]
+
+tbl.contrat_ITT_expo.saison[departmt %in% c("16",
+                                     "17",
+                                     "19",
+                                     "23",
+                                     "24",
+                                     "33",
+                                     "40",
+                                     "47",
+                                     "64",
+                                     "79",
+                                     "86",
+                                     "87",
+                                     "81"), region := "Nouvelle-Aquitaine"]
+
+
+tbl.contrat_ITT_expo.saison[departmt %in% c("18",
+                                     "28",
+                                     "36",
+                                     "37",
+                                     "41",
+                                     "45"), region := "Centre Val de Loire"]
+
+tbl.contrat_ITT_expo.saison[departmt %in% c("85",
+                                     "72",
+                                     "53",
+                                     "49",
+                                     "44"), region := "Pays de la Loire"]
+
+tbl.contrat_ITT_expo.saison[departmt %in% c("21",
+                                     "25",
+                                     "39",
+                                     "58",
+                                     "70",
+                                     "71",
+                                     "89",
+                                     "90"), region := "Bourgogne Franche Comte"]
+
+tbl.contrat_ITT_expo.saison[departmt %in% c("78",
+                                     "75",
+                                     "91",
+                                     "92",
+                                     "93",
+                                     "94",
+                                     "95",
+                                     "77"), region := "Ile de France"]
+
+tbl.contrat_ITT_expo.saison[departmt %in% c("22",
+                                     "29",
+                                     "35",
+                                     "56"), region := "Bretagne"]
+
+tbl.contrat_ITT_expo.saison[departmt %in% c("20"), region := "Corse"]
+tbl.contrat_ITT_expo.saison[departmt %in% c("97",
+                                     "98",
+                                     "99"), region := "Outre-Mer et Etranger"]
+
+
+# Ajout de la variable aire urbaine sur cette nouvelle base
+tbl.contrat_ITT_expo.saison <- merge(x = tbl.contrat_ITT_expo.saison,
+                              y = tbl.type_zone_cod[, c(2, 4, 5, 9)],
+                              by.x = "burDis",
+                              by.y = "Libelle geographique")
+
+tbl.contrat_ITT_expo.saison$SexeAss <- as.factor(tbl.contrat_ITT_expo.saison$SexeAss)
+
+###############################################################################################-
+# Ajout d'une variable "mois" pour etudier une certaine saisonnalite dans la sinistralite ITT #----
+###############################################################################################-
+
+
+tbl.contrat_ITT_expo.saison[, mois := months(debut.periode)]
+
+
+# ajout de la variable saison (ne garder que les habitants de la France metropolitaine)
+
+tbl.contrat_ITT_expo.saison[mois %in% c("decembre",
+                                        "janvier", 
+                                        "fevrier"), saison := "Hiver"]
+
+tbl.contrat_ITT_expo.saison[mois %in% c("mars",
+                                        "avril",
+                                        "mai"), saison := "Printemps"]
+
+tbl.contrat_ITT_expo.saison[mois %in% c("juin",
+                                        "juillet",
+                                        "août"), saison := "Ete"]
+
+tbl.contrat_ITT_expo.saison[mois %in% c("septembre",
+                                        "octobre",
+                                        "novembre"), saison := "Automne"]
+
+# verification : 
+tbl.contrat_ITT_expo.saison[, .N, by = saison]
+
+
+# on enlève quelques donnees manquantes ainsi que la modalite societe dans SexeAss
+tbl.contrat_ITT_expo.saison <- tbl.contrat_ITT_expo.saison[!is.na(tbl.contrat_ITT_expo.saison$tranches.agexp)]
+tbl.contrat_ITT_expo.saison <- tbl.contrat_ITT_expo.saison[!is.na(tbl.contrat_ITT_expo.saison$region)]
+tbl.contrat_ITT_expo.saison <- subset(tbl.contrat_ITT_expo.saison, SexeAss != "StÃ©")
+
+# agregation des donnees syntaxe dplyr
+tbl.contrat_ITT_expo.saison.sum <- tbl.contrat_ITT_expo.saison %>% mutate %>%
+  select(idtAdh, 
+         IsFumeur.x, 
+         capitaux.x, 
+         rachat.credit.x, 
+         exposition, 
+         sinistreITT, 
+         tranches.agexp, 
+         SexeAss, 
+         couverture_mno,
+         region, 
+         saison)%>%
+  group_by(saison, IsFumeur.x, capitaux.x, rachat.credit.x,  
+           tranches.agexp, SexeAss, couverture_mno, region)%>%
+  summarise(somme.exp = sum(exposition),
+            n.sinistres = sum(as.integer(sinistreITT)))
+
+# syntaxe data.table
+
+tbl.contrat_ITT_expo.saison.sum <- tbl.contrat_ITT_expo.saison[, 
+                                                               .(somme.exp = sum(exposition),
+                                    n.sinistres = sum(as.integer(n.sinistres))
+                                    ), 
+                                by = c("saison", "IsFumeur.x", "capitaux.x" ,
+                                       "rachat.credit.x", 
+                                       "tranches.agexp", "SexeAss",    
+                                       "couverture_mno","region", "Type de commune") ]
+
+
+colnames(tbl.contrat_ITT_expo.saison.sum)[9] <- c("TypeCommune")
+
+
+
+
+ggplot(tbl.contrat_ITT_expo.saison.sum, aes(x=capitaux.x, y=n.sinistres))+
+  geom_point() 
+
+
+
+# Modele avec la variable saison-
+set.seed(1999)
+sample14 <- sample(c(TRUE, FALSE), nrow(tbl.contrat_ITT_expo.saison.sum), replace=TRUE, prob=c(0.8,0.2))
+train.modele.mois  <- marre_de_l_encodage(tbl.contrat_ITT_expo.saison.sum[sample14, ])
+test.modele.mois  <- marre_de_l_encodage(tbl.contrat_ITT_expo.saison.sum[!sample14, ])
+
+modele.mois <- glm(n.sinistres ~ capitaux.x + 
+                     rachat.credit.x + 
+                     IsFumeur.x + 
+                     tranches.agexp + 
+                     couverture_mno + 
+                     region +
+                     saison+
+                     SexeAss+
+                     TypeCommune+
+                     offset(log(somme.exp)),
+                      data = train.modele.mois,
+                      family = poisson(link = "log"))
+
+summary(modele.mois)
+
+# View(tbl.contrat_ITT_expo.saison.sum)
+sum(train.modele.mois$n.sinistres)
+predictions_mois <- predict(modele.mois, newdata = test.modele.mois, type = "response")
+sum(predictions_mois)
+test_mois <- cbind(test.modele.mois, predictions_mois)
+
+predict_mois <-test_mois[, .(nb_sinistre_predit = sum(predictions_mois), nb_sinistre_reel = sum(as.numeric(n.sinistres)), nb_observations = .N), by = c("n.sinistres", "saison")]
+
+# Courbe ROC et AUC
+roc_obj_mois <- roc(test_mois$n.sinistres, predictions_mois)
+plot(roc_obj_mois)
+auc(test_mois$n.sinistres, predictions_mois)
+
+# visualisation des probabilites
+
+plot(allEffects(modele.mois))
+
+############################################-
+# Validation croisee sur le modèle complet #----
+############################################-
+
+train.control <- trainControl(method = "cv", number = 10)
+
+model <- train(n.sinistres ~ capitaux.x + 
+                rachat.credit.x + 
+                 IsFumeur.x + 
+                 tranches.agexp + 
+                 couverture_mno + 
+                 region +
+                 saison+
+                 SexeAss+
+                 TypeCommune+
+               offset(log(somme.exp)),
+               data = tbl.contrat_ITT_expo.saison.sum, method = "glm",
+               trControl = train.control)
+
+print(model)
+
+auc_cost1.6 <- function(observed, predicted) {
+  auc_value <- roc(test.modele.mois$n.sinistres, predictions_mois)$auc
+  return(1 - auc_value) 
+}
+k <- 10  
+cv_result1.6 <- cv.glm(tbl.contrat_ITT_expo.saison.sum, modele.mois, auc_cost1.6,K = k)
+cv_result1.6$delta
+average_auc1.6 <- 1 - cv_result1.6$delta[1]
+adjust_auc1.6 <- 1 - cv_result1.6$delta[2]
+
+# ESSAYER AVEC MOINS DE VARIAAAAAAAABLLLLLEEEEESSSSSS
+
+
+
+# boxplot des predictions par nombre de sinistres observes
+
+ggplot(predict_mois, aes(x = as.factor(nb_sinistre_reel), y = nb_sinistre_predit)) +
+  geom_boxplot() +
+  labs(x = "Nombre de sinistres observes", y = "Predictions", 
+       title = "Boxplot des predictions par nombre de sinistres observes") +
+  theme_minimal()
+
+
+
+tbl.contrat_ITT_expo <- subset(tbl.contrat_ITT_expo, SexeAss != "Sté")
+model.gam <- gam(data = tbl.contrat_ITT_expo,
+                 formula = n.sinistres ~ s(age.expo) + as.factor(SexeAss) +
+                   as.factor(IsFumeur.y) + offset(log(exposition)),
+                 family = poisson(link = log)) 
+
+summary(model.gam)
+plot(model.gam, residuals = TRUE, pch = 1)
+
+
+# Calcul de probabilit?s ? partir des odds-ratio
+
+odds_p <- exp(modele.complet.tage$coefficients)
+prob <- odds_p / (1 + odds_p)
+
+
+# Crétation d'une table permettant de calculer la proba
+
+
+niveaux_tranche_age_contrat <- levels(train.modele.complet.tage$tranche.age.contrat)
+niveaux_tranche_age_exp <- levels(train.modele.complet.tage$tranches.agexp)
+niveaux_region <- levels(train.modele.complet.tage$region)
+niveaux_capitaux <- levels(train.modele.complet.tage$capitaux)
+niveaux_rachat.credit <- levels(train.modele.complet.tage$rachat.credit)
+niveaux_IsFumeur.y <- levels(train.modele.complet.tage$IsFumeur.y)
+niveaux_TypeCommune <- levels(train.modele.complet.tage$TypeCommune)
+niveaux_couverture_mno <- levels(train.modele.complet.tage$couverture_mno)
+
+
+
+# Prise de tout les cas possibles pour les prédictions
+table_proba <- expand.grid(
+  rachat.credit = niveaux_rachat.credit,
+  IsFumeur.y = niveaux_IsFumeur.y,
+  tranches.agexp = niveaux_tranche_age_exp,
+  TypeCommune = niveaux_TypeCommune,
+  couverture_mno = niveaux_couverture_mno,
+  tranche.age.contrat = niveaux_tranche_age_contrat,
+  capitaux = niveaux_capitaux,
+  exposition = 1 
+)
+
+
+
+comptage <- train.modele.complet.tage %>%
+  group_by(tranche.age.contrat, 
+           rachat.credit, 
+           IsFumeur.y, 
+           TypeCommune,
+           capitaux,
+           couverture_mno) %>%
+  summarise(count = n(), .groups = 'drop')
+# Le profil qui revient le plus est une personne avec un contrat d'une durée > 3 ans, 
+# entre 31 et 40 ans, sans RAC, qui ne fume pas, qui vit en ville et qui n'est pas couverture pour les MNO
+
+# prédiction des probas 
+probabilities <- predict(modele.complet.tage, newdata = table_proba, type = "response")
+
+# Ajout des probas
+table_proba$probabilities <- probabilities
+
+
+# Mise en data.table car c'est quand meme mieux
+setDT(table_proba)
+table_proba[rachat.credit == 0 
+         & IsFumeur.y == 1
+         & TypeCommune == 'Hors unité urbaine' 
+         & couverture_mno == 0
+         & capitaux == 'petit'
+         & tranche.age.contrat == '< 3 ', .(tranches.agexp,probabilities)][order(tranches.agexp)]
+
+setwd("R:/Technique - Service/TECHNIQUE/PENTINAT_Antoine/fichiers R")
+write.table(table_proba, "table_proba_itt.csv", row.names=FALSE, sep = ";", dec=".")
+
+
+###############################################-
+# Tentative de modèle de Kaplan Meier     #####----
+###############################################-
+
+
+# Creation de la table adequate
+
+
+tbl.kaplan <- merge(x = tbl.contrat_ITT,
+                    y = tbl.sinistres_complet[, c(2, 3, 8:10, 18)],
+                    by.x = "idtAdh",
+                    by.y = "idtadh",
+                    all.x = TRUE)
+
+tbl.kaplan <- merge(x = tbl.kaplan,
+                    y = tbl.infoassures[, c(1, 38, 44)],
+                    by.x = "idtAdh",
+                    by.y = "idtAdh",
+                    all.x = TRUE)
+
+
+# on ne garde que les colonnes qui nous interessent afin d'y voir plus clair
+
+tbl.kaplan <- tbl.kaplan[, -c(2:9, 21:23, 27:33)]
+
+setDT(tbl.kaplan)
+tbl.kaplan$time_in <- (unclass(tbl.kaplan$debut.garantie) - unclass(tbl.kaplan$Date.Naissance.Assure1))/365.25
+
+tbl.kaplan[, date.fin.expo := pmin(tbl.kaplan$fin.garantie, 
+                                  tbl.kaplan$date_sinistre, 
+                                  as.Date("2023/12/31"), na.rm = TRUE)]
+tbl.kaplan$time_out <-(unclass(tbl.kaplan$date.fin.expo) - unclass(tbl.kaplan$Date.Naissance.Assure1))/365.25
+tbl.kaplan <- unique(tbl.kaplan)
+
+tbl.kaplan$time_diff <- tbl.kaplan$time_out - tbl.kaplan$time_in
+tbl.kaplan <- tbl.kaplan[time_out > time_in]
+
+tbl.kaplan$sinistreITT <- as.integer(tbl.kaplan$sinistreITT) - 1
+
+#########################-
+#  Modèle               #----
+#########################-
+
+# creation de l'objet de type "Surv"
+surv <- Surv(time = tbl.kaplan$time_in, time2 = tbl.kaplan$time_out, event = tbl.kaplan$sinistreITT)
+
+# Modele
+km <- survfit(surv ~ rachat.credit, data = tbl.kaplan)
+print(km)
+
+# plot de la courbe de survie (on peut y voir l'impact de l'age de l'assuré au moment de l'année du contrat
+# sur la sinistralité ITT)
+plot(km)
+
+km_fit <- ggsurvplot(km, 
+  risk.table = TRUE,
+  risk.table.pos = 'in'
+)
+
+# Creation de la table de sinisralité
+tbl.qx.bruts <- data.table(time = km$time,
+                           age = ceiling(km$time),
+                           S = km$surv, 
+                           ri = km$n.risk,
+                           di = km$n.event)
+
+tbl.qx.bruts[, st := min(S), by = age]
+tbl.qx.bruts[, poids := max(ri), by = age]
+# Calcul d'un terme pour les intervalles de confiance (df ci-dessous)
+# nota bene : il y un dacallage ... d'oÃ¹ le shift qui suit (bien regarder la formule ..)
+tbl.qx.bruts[, terme_ci := sqrt(sum(di/(ri*(ri-di)))), by = age]
+tbl.qx.bruts <- unique(tbl.qx.bruts[, .(st, age, terme_ci, poids)])[order(age)]
+tbl.qx.bruts[, terme_ci := shift(terme_ci, type = "lead")]
+tbl.qx.bruts[, qx_hat := 1 - shift(st, type = "lead")/st ]
+
+# On mets la table dans un repertoire
+setwd("R:/Technique - Service/TECHNIQUE/PENTINAT_Antoine/fichiers R")
+write.table(tbl.qx.bruts, "table_de_survenance_itt.csv", row.names=FALSE, sep = ";", dec=".")
+
+# On va liberer de la mémoire 
+gc()
+
+
+
+############################################################-
+#      Nouvelles tables (avec VLR et Aires Urbaines)       #----
+############################################################-
+
+
+# Ajout de la variable VLR dans le modèle
+
+# On va utiliser un jeu de données synthétisé (qui contient la variable VLR) 
+# auquel on va ajouter la variable "TypeCommune" 
+
+
+# Import des donnéees
+tbl.donnee.itt <- fread("R:/Technique - Service/TECHNIQUE/WHILLEM/etude_complementaires/donnees modele antoine.csv", 
+                        sep = ";", dec = ',')
+
+# On ajout la variable TypeCommune
+tbl.donnee.itt <- merge(x = tbl.donnee.itt,
+                        y = tbl.type_zone_cod[, c(2, 4, 5, 9)],
+                        by.x = "burDis",
+                        by.y = "Libelle geographique")
+colnames(tbl.donnee.itt)[66] <- c("TypeCommune")
+
+
+tbl.donnee.itt[, tranches.agexp:= fcase(age.expo <= 30 , "<= 30",
+                                     age.expo <= 40 , "31-40",
+                                     age.expo <= 45 , "41-45",
+                                     age.expo <= 50 , "46-50",
+                                     age.expo <= 55 , "51-55",
+                                     age.expo <= 60 , "56-60",
+                                     default = "> 60")]
+
+
+# creation de la variable
+tbl.donnee.itt$tranche.age.contrat <- cut(tbl.donnee.itt$age_contrat, 
+                                                breaks = c(0, 3, Inf), 
+                                                labels = c("< 3 ", "> 3"))
+
+
+tbl.donnee.itt$VLR <- as.factor(tbl.donnee.itt$VLR)
+tbl.donnee.itt$rachat.credit <- as.factor(tbl.donnee.itt$rachat.credit)
+tbl.donnee.itt$IsFumeur.y <- as.factor(tbl.donnee.itt$IsFumeur.y)
+tbl.donnee.itt$couverture_mno <- as.factor(tbl.donnee.itt$couverture_mno)
+
+
+
+# Entrainement du modèle
+
+set.seed(1999)
+sample17 <- sample(c(TRUE, FALSE), nrow(tbl.donnee.itt), replace=TRUE, prob=c(0.8,0.2))
+train.modele.vlr  <- marre_de_l_encodage(tbl.donnee.itt[sample17, ])
+test.modele.vlr  <- marre_de_l_encodage(tbl.donnee.itt[!sample17, ])
+
+modele.vlr<- glm(n.sinistres ~ capitaux + 
+                     rachat.credit + 
+                     IsFumeur.y + 
+                     tranches.agexp + 
+                     couverture_mno + 
+                     VLR +
+                     TypeCommune+
+                     tranche.age.contrat+
+                     offset(log(exposition)),
+                   data = train.modele.vlr,
+                   family = poisson)
+
+summary(modele.vlr)
+
+nombre_vlr <- predict(modele.vlr, newdata = test.modele.vlr, type = "response")
+predictions_vlr <- 1- exp(-predict(modele.vlr, newdata = test.modele.vlr, type = "response")) # car régression de poisson et qu'on veut une proba et non un nombre
+sum(predictions_vlr)
+test_vlr <- cbind(test.modele.vlr, predictions_vlr)
+
+predict_vlr <-test_vlr[, .(nb_sinistre_predit = sum(predictions_vlr), nb_sinistre_reel = sum(as.numeric(n.sinistres)), nb_observations = .N), by = c("sinistreITT", "VLR", "tranches.agexp")]
+
+
+# Pareil sur train 
+
+nombre_vlr_train <- predict(modele.vlr, newdata = train.modele.vlr, type = "response")
+predictions_vlr_train <- 1 - exp(-predict(modele.vlr, newdata = train.modele.vlr, type = "response")) # car régression de poisson et qu'on veut une proba et non un nombre
+sum(predictions_vlr_train)
+train_vlr <- cbind(train.modele.vlr, predictions_vlr_train)
+
+
+predict_vlr_train <-train_vlr[, .(nb_sinistre_predit = sum(predictions_vlr_train), nb_sinistre_reel = sum(as.numeric(n.sinistres)), nb_observations = .N), by = c("sinistreITT", "VLR", "tranches.agexp")]
+roc_train <- roc(train_vlr$n.sinistres, predictions_vlr_train)
+plot(roc_train)
+auc(train_vlr$sinistreITT, predictions_vlr_train)
+
+# Courbe ROC et AUC
+
+roc_obj_vlr <- roc(test_vlr$sinistreITT, predictions_vlr)
+plot(roc_obj_vlr)
+auc(test_vlr$sinistreITT, predictions_vlr)
+
+# Validation croisée sur le modèle VLR
+
+
+auc_cost1.7 <- function(observed, predicted) {
+  auc_value <- roc(test.modele.vlr$n.sinistres, predictions_vlr)$auc
+  return(1 - auc_value) 
+}
+k <- 10  
+cv_result1.7 <- cv.glm(tbl.donnee.itt, modele.vlr, auc_cost1.7,K = k)
+cv_result1.7$delta
+average_auc1.7 <- 1 - cv_result1.7$delta[1]
+adjust_auc1.7 <- 1 - cv_result1.7$delta[2]
+
+
+# Creation de la table -
+
+odds_p <- exp(modele.vlr$coefficients)
+prob <- odds_p / (1 + odds_p)
+
+
+# Crétation d'une table permettant de calculer la proba
+
+
+niveaux_tranche_age_contrat <- levels(as.factor(train.modele.vlr$tranche.age.contrat))
+niveaux_tranche_age_exp <- levels(as.factor(train.modele.vlr$tranches.agexp))
+niveaux_capitaux <- levels(as.factor(train.modele.vlr$capitaux))
+niveaux_rachat.credit <- levels(as.factor(train.modele.vlr$rachat.credit))
+niveaux_IsFumeur.y <- levels(as.factor(train.modele.vlr$IsFumeur.y))
+niveaux_TypeCommune <- levels(as.factor(train.modele.vlr$TypeCommune))
+niveaux_couverture_mno <- levels(as.factor(train.modele.vlr$couverture_mno))
+niveaux_vlr <- levels(as.factor(train.modele.vlr$VLR))
+
+
+# Prise de tout les cas possibles pour les prédictions
+table_proba <- expand.grid(
+  rachat.credit = niveaux_rachat.credit,
+  IsFumeur.y = niveaux_IsFumeur.y,
+#  tranches.agexp = niveaux_tranche_age_exp,
+  TypeCommune = niveaux_TypeCommune,
+  couverture_mno = niveaux_couverture_mno,
+  tranche.age.contrat = niveaux_tranche_age_contrat,
+  capitaux = niveaux_capitaux,
+  VLR = niveaux_vlr,
+  age.expo = 18:70,
+  exposition = 1 
+)
+setDT(table_proba)
+table_proba[, tranches.agexp:= fcase(age.expo <= 30 , "<= 30",
+                                        age.expo <= 40 , "31-40",
+                                        age.expo <= 45 , "41-45",
+                                        age.expo <= 50 , "46-50",
+                                        age.expo <= 55 , "51-55",
+                                        age.expo <= 60 , "56-60",
+                                        default = "> 60")]
+
+comptage <- train.modele.vlr %>%
+  group_by(tranche.age.contrat, 
+           rachat.credit, 
+           IsFumeur.y, 
+           TypeCommune,
+           capitaux,
+           couverture_mno,
+           VLR) %>%
+  summarise(count = n(), .groups = 'drop')
+# Le profil qui revient le plus est une personne avec un contrat d'une durée > 3 ans, 
+# entre 31 et 40 ans, sans RAC, qui ne fume pas, qui vit en ville et qui n'est pas couverture pour les MNO
+
+# prédiction des probas 
+probabilities <- 1 - exp(-predict(modele.vlr, newdata = table_proba, type = "response"))
+
+# Ajout des probas
+table_proba$probabilities <- probabilities
+
+
+# Mise en data.table car c'est quand meme mieux
+setDT(table_proba)
+t <- table_proba[rachat.credit == 0 
+            & IsFumeur.y == 1
+            & TypeCommune == 'Hors unité urbaine' 
+            & couverture_mno == 0
+            & capitaux == 'petit'
+            & VLR == 1
+            & tranche.age.contrat == '< 3 ', .(tranches.agexp,probabilities,age.expo)][order(tranches.agexp)]
+
+
+
+table_proba[, nom.table := paste0("rac", ":", rachat.credit,
+                                           "fum", ":", IsFumeur.y,
+                                           "mno", ":", couverture_mno,
+                                           "moins_3_ans", ":", tranche.age.contrat,
+                                           "TypeCommune", ":", TypeCommune,
+                                           "VLR", ":", VLR,
+                                           "capitaux", ":", capitaux)]
+
+
+fig <- plot_ly(data = table_proba, 
+        x = ~age.expo , y = ~ probabilities, color =~nom.table)
+fig <- fig %>% add_lines()
+fig
+
+
+setwd("R:/Technique - Service/TECHNIQUE/PENTINAT_Antoine/Table proba itt ")
+write.table(table_proba, "nouvelle_table_proba_itt.csv", row.names=FALSE, sep = ";", dec=".")
+
+
+
+###########################################################-
+#   Graphiques taux de sinistres predits/ Taux observé     ----
+###########################################################-
+
+# Ces taux sont determinés via le modèle de regression de poisson entrainé juste au dessus
+
+# Taux observé
+
+taux_sinistralite <- tbl.donnee.itt %>%
+  group_by(tranche.age.contrat, 
+           tranches.agexp, 
+           rachat.credit, 
+           capitaux, 
+           VLR, 
+           TypeCommune,
+           couverture_mno, 
+           IsFumeur.y) %>%
+  summarise(
+    sinistres_total = sum(sinistreITT),
+    exposition_total = sum(exposition),
+    taux_sinistralite = sinistres_total / exposition_total
+  )
+
+
+
+# Taux avec un modèle avec des données aggregées
+
+
+tbl.donnee.itt.ag <- tbl.donnee.itt[,
+                                    .(somme.exp = sum(exposition),
+                                      n.sinistres = sum(n.sinistres)),
+                                    by = c("IsFumeur.y", "capitaux" ,
+                                           "rachat.credit", 
+                                           "tranches.agexp", "VLR",    
+                                           "couverture_mno", "TypeCommune", "tranche.age.contrat") ]
+
+set.seed(1999)
+sample18 <- sample(c(TRUE, FALSE), nrow(tbl.donnee.itt.ag), replace=TRUE, prob=c(0.8,0.2))
+train.modele.vlr.ag  <- marre_de_l_encodage(tbl.donnee.itt.ag[sample18, ])
+test.modele.vlr.ag  <- marre_de_l_encodage(tbl.donnee.itt.ag[!sample18, ])
+
+modele.vlr.ag<- glm(n.sinistres ~ capitaux + 
+                      rachat.credit + 
+                      IsFumeur.y + 
+                      tranches.agexp + 
+                      couverture_mno + 
+                      VLR +
+                      TypeCommune+
+                      tranche.age.contrat+
+                      offset(log(somme.exp)),
+                    data = train.modele.vlr.ag,
+                    family = poisson(link = "log"))
+
+summary(modele.vlr.ag)
+
+predictions_vlr.ag.total <- predict(modele.vlr.ag, newdata = test.modele.vlr.ag, type = "response") # car régression de poisson et qu'on veut une proba et non un nombre
+
+test_vlr.ag <- cbind(test.modele.vlr.ag, predictions_vlr.ag.total)
+predict_vlr.ag <-test_vlr.ag[, .(nb_sinistre_predit = sum(predictions_vlr.ag.total), nb_sinistre_reel =sum(n.sinistres), nb_observations = .N, expo.totale = sum(somme.exp)), by = c("VLR", "tranches.agexp", "tranche.age.contrat", "IsFumeur.y")]
+
+
+
+plot(predict_vlr.ag[, nb_sinistre_predit/expo.totale], predict_vlr.ag[, nb_sinistre_reel/expo.totale],
+     main = "Nuage de points : Taux prédit vs Taux observé",
+     xlab = "Taux de sinistralité prédit",
+     ylab = "Taux de sinistralité observé",
+     pch = 19, # Type de point (ici, des cercles pleins)
+     col = "blue") # Couleur des points
+
+
+# Ajouter la première bissectrice
+abline(coef = c(0,1))
+
+
+# Optionnel : Ajouter une ligne d'ajustement linéaire
+abline(lm(taux_sinistralite$taux_sinistralite ~ predictions_vlr.ag.total), col = "red")
+
+
+
+
+###############################################-
+# Nouvelle table et nouveau modèle             ----
+###############################################-
+
+
+# On va ajouter la variable VLR au modèle logit fait précédemment
+
+
+# Jointure pour ajouter la variable VLR
+
+tbl.contrat_ITT_expo <- merge(x = tbl.contrat_ITT_expo,
+                              y = tbl.options,
+                              by.x = "idtAdh",
+                              by.y = "idtAdh",
+                              all.x = TRUE)
+
+set.seed(1999)
+sample19 <- sample(c(TRUE, FALSE), nrow(tbl.contrat_ITT_expo), replace=TRUE, prob=c(0.8,0.2))
+train.modele.complet.vlr  <- tbl.contrat_ITT_expo[sample19, ]
+test.modele.complet.vlr  <- tbl.contrat_ITT_expo[!sample19, ]
+
+modele.complet.vlr <- glm(sinistreITT ~  
+                             rachat.credit + 
+                             IsFumeur.y + 
+                             tranches.agexp + 
+                             TypeCommune + 
+                             couverture_mno +
+                             tranche.age.contrat+
+                             VLR+
+                             offset(log(exposition)),
+                           data = train.modele.complet.vlr,
+                           family = binomial(link = "logit"))
+
+summary(modele.complet.vlr)
+
+# Predictions du modèle
+predictions_complet.vlr <- predict(modele.complet.vlr, newdata = test.modele.complet.vlr, type = "response")
+
+test_complet.vlr <- cbind(test.modele.complet.vlr, predictions_complet.vlr)
+
+predict_complet.vlr <-test_complet.vlr[, 
+                                       .(nb_sinistre_predit = sum(predictions_complet.vlr), 
+                                         nb_sinistre_reel = sum(as.numeric(sinistreITT)-1), 
+                                         nb_observations = .N), 
+                                        by = c("region", "VLR", "TypeCommune", "tranche.age.contrat", "region","tranches.agexp")]
+
+# predict_complet.age <- predict_complet.age[-14,]
+
+# Courbe ROC et AUC
+roc_obj_complet.vlr <- roc(test_complet.vlr$sinistreITT, predictions_complet.vlr)
+plot(roc_obj_complet.vlr)
+auc(test_complet.vlr$sinistreITT, predictions_complet.vlr)
+
+
+# validation croisée 
+auc_cost1.8 <- function(observed, predicted) {
+  auc_value <- roc(test_complet.vlr$sinistreITT, predictions_complet.vlr)$auc
+  return(1 - auc_value) 
+}
+k <- 10  
+cv_result1.8 <- cv.glm(tbl.contrat_ITT_expo, modele.complet.vlr, auc_cost1.8,K = k)
+cv_result1.8$delta
+average_auc1.8 <- 1 - cv_result1.8$delta[1]
+adjust_auc1.8 <- 1 - cv_result1.8$delta[2]
+
+
+# Calcul de probabilit?s ? partir des odds-ratio
+
+odds_p <- exp(modele.complet.vlr$coefficients)
+prob <- odds_p / (1 + odds_p)
+
+
+# Crétation d'une table permettant de calculer la proba
+
+
+niveaux_tranche_age_contrat <- levels(train.modele.complet.vlr$tranche.age.contrat)
+niveaux_tranche_age_exp <- levels(train.modele.complet.vlr$tranches.agexp)
+niveaux_region <- levels(train.modele.complet.vlr$region)
+niveaux_capitaux <- levels(train.modele.complet.vlr$capitaux)
+niveaux_rachat.credit <- levels(train.modele.complet.vlr$rachat.credit)
+niveaux_IsFumeur.y <- levels(train.modele.complet.vlr$IsFumeur.y)
+niveaux_TypeCommune <- levels(train.modele.complet.vlr$TypeCommune)
+niveaux_couverture_mno <- levels(train.modele.complet.vlr$couverture_mno)
+niveaux_vlr <- levels(as.factor(train.modele.complet.vlr$VLR))
+
+
+# Prise de tout les cas possibles pour les prédictions
+table_proba <- expand.grid(
+  rachat.credit = niveaux_rachat.credit,
+  IsFumeur.y = niveaux_IsFumeur.y,
+  tranches.agexp = niveaux_tranche_age_exp,
+  TypeCommune = niveaux_TypeCommune,
+  couverture_mno = niveaux_couverture_mno,
+  tranche.age.contrat = niveaux_tranche_age_contrat,
+  capitaux = niveaux_capitaux,
+  VLR = niveaux_vlr,
+  exposition = 1 
+)
+
+comptage <- train.modele.complet.vlr %>%
+  group_by(tranche.age.contrat, 
+           rachat.credit, 
+           IsFumeur.y, 
+           TypeCommune,
+           capitaux,
+           couverture_mno,
+           VLR) %>%
+  summarise(count = n(), .groups = 'drop')
+# Le profil qui revient le plus est une personne avec un contrat d'une durée > 3 ans, 
+# entre 31 et 40 ans, sans RAC, qui ne fume pas, qui vit en ville et qui n'est pas couverture pour les MNO
+
+# prédiction des probas 
+probabilities <- predict(modele.complet.vlr, newdata = table_proba, type = "response")
+
+# Ajout des probas
+table_proba$probabilities <- probabilities
+
+
+# Mise en data.table car c'est quand meme mieux
+setDT(table_proba)
+table_proba[rachat.credit == 0 
+            & IsFumeur.y == 1
+            & TypeCommune == 'Hors unité urbaine' 
+            & couverture_mno == 0
+            & capitaux == 'petit'
+            & VLR == 0
+            & tranche.age.contrat == '< 3 ', .(tranches.agexp,probabilities)][order(tranches.agexp)]
+
+setwd("R:/Technique - Service/TECHNIQUE/PENTINAT_Antoine/fichiers R")
+write.table(table_proba, "table_proba_itt.V2.csv", row.names=FALSE, sep = ";", dec=".")
+
+
+################################################-
+#     Ajout de la variable Objet de Pret      ----
+################################################-
+
+
+tbl.donnee.itt <- pretpro(tbl.donnee.itt)
+tbl.donnee.itt$pretpro <- as.factor(tbl.donnee.itt$pretpro)
+
+# Export de cette table afin de la réutiliser et entrainer les modèles sans relancer tout le code
+setwd("R:/Technique - Service/TECHNIQUE/PENTINAT_Antoine/fichiers R")
+write.table(tbl.donnee.itt, "tbl.donnee.itt.csv", row.names=FALSE, sep = ";", dec=".")
+
+tbl.donnee.itt <- read.csv("R:/Technique - Service/TECHNIQUE/PENTINAT_Antoine/fichiers R/tbl.donnee.itt.csv", sep = ";", dec = ".")
+setDT(tbl.donnee.itt)
+
+
+
+# Ajout de la variable objetpret afin de segmenter selon le type de credit
+
+tbl.donnee.itt <- objetpret(tbl.donnee.itt)
+
+
+# Nouveau modèle 
+
+set.seed(1999)
+sample19 <- sample(c(TRUE, FALSE), nrow(tbl.donnee.itt), replace=TRUE, prob=c(0.8,0.2))
+train.modele.pret  <- marre_de_l_encodage(tbl.donnee.itt[sample19, ])
+test.modele.pret  <- marre_de_l_encodage(tbl.donnee.itt[!sample19, ])
+
+modele.pret<- glm(sinistreITT ~ capitaux + 
+                      rachat.credit + 
+                      IsFumeur.y + 
+                      tranches.agexp + 
+                      couverture_mno + 
+                      VLR +
+                      TypeCommune+
+                      tranche.age.contrat+
+                      objetpret+
+                      offset(log(exposition)),
+                    data = train.modele.pret,
+                    family = binomial(link = "logit"))
+
+summary(modele.pret)
+
+predictions_pret <- predict(modele.pret, newdata = test.modele.pret, type = "response") # car régression de poisson et qu'on veut une proba et non un nombre
+
+test_pret <- cbind(test.modele.pret, predictions_pret)
+predict_pret <-test_pret[, .(nb_sinistre_predit = sum(predictions_pret), 
+                             nb_sinistre_reel =sum(sinistreITT), 
+                             nb_observations = .N, 
+                             expo.totale = sum(exposition)), 
+                         by = c("VLR", "tranches.agexp", "tranche.age.contrat", "IsFumeur.y", "pretpro")]
+
+
+predict_pret$ecart <- abs(predict_pret$nb_sinistre_predit - predict_pret$nb_sinistre_reel)
+
+# Courbe ROC et AUC
+roc_obj_pret <- roc(test_pret$sinistreITT, predictions_pret)
+plot(roc_obj_pret)
+auc(test_pret$sinistreITT, predictions_pret)
+
+
+# validation croisée (On va tenter de prendre le RMSE)
+# On ré-entraine le modèle sur le jeu de données complet
+
+modele.pret.cv<- glm(sinistreITT ~ capitaux + 
+                    rachat.credit + 
+                    IsFumeur.y + 
+                    tranches.agexp + 
+                    couverture_mno + 
+                    VLR +
+                    TypeCommune+
+                    tranche.age.contrat+
+                    objetpret+
+                    offset(log(exposition)),
+                  data = tbl.donnee.itt,
+                  family = binomial(link = "logit"))
+k <- 10  
+cv_result1.9 <- cv.glm(tbl.donnee.itt, modele.pret.cv,K = k)
+mse <- cv_result1.9$delta[1]
+rmse <- sqrt(mse)
+
+
